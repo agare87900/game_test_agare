@@ -69,6 +69,26 @@
             background: rgba(0, 0, 0, 0.9);
         }
 
+        .hotbar-slot.hand-slot {
+            border-color: #a8772a;
+            background: rgba(45, 28, 6, 0.82);
+            min-width: 58px;
+            font-size: 11px;
+        }
+
+        .hotbar-slot.gear-slot {
+            border-color: #2a7ba8;
+            background: rgba(8, 24, 40, 0.82);
+            min-width: 58px;
+            font-size: 11px;
+        }
+
+        .hotbar-slot.mode-selected {
+            border-color: #7ad7ff;
+            box-shadow: 0 0 12px rgba(122, 215, 255, 0.55);
+            background: rgba(10, 40, 60, 0.95);
+        }
+
         .block-name {
             font-size: 12px;
             color: #aaa;
@@ -192,6 +212,7 @@
     <div id="crosshair"></div>
     
     <div id="ui">
+        <div class="hotbar-slot hand-slot" data-block="0" data-equip-slot="offHand">L</div>
         <div class="hotbar-slot selected" data-block="0">
             <div>
                 <div class="block-name"></div>
@@ -237,6 +258,10 @@
                 <div class="block-name"></div>
             </div>
         </div>
+        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="0">M1</div>
+        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="1">M2</div>
+        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="2">M3</div>
+        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="3">M4</div>
     </div>
 
     <div id="info">

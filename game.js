@@ -616,7 +616,7 @@ class VoxelWorld {
                     }
                 }
 
-                // Tree placement after column generated
+                // Tree and tall-grass placement after column generated
                 if ((biome === 'forest' || biome === 'snowy_forest') && height > this.waterLevel + 1) {
                     // Use seeded noise for deterministic tree placement across clients
                     const treeNoise = this.noise.noise2D(worldX * 0.3, worldZ * 0.3);
@@ -656,6 +656,16 @@ class VoxelWorld {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    } else if (biome === 'forest' && r < 0.36) {
+                        // Scatter tall grass in forests when a tree is not spawned.
+                        const grassY = height + 1;
+                        if (grassY < this.chunkHeight) {
+                            const belowIdx = this.getBlockIndex(x, height, z);
+                            const grassIdx = this.getBlockIndex(x, grassY, z);
+                            if (chunk.blocks[belowIdx] === 2 && chunk.blocks[grassIdx] === 0) {
+                                chunk.blocks[grassIdx] = 69; // Tall Grass
                             }
                         }
                     }
@@ -1313,13 +1323,24 @@ class VoxelWorld {
         chunk.modified = true;
         chunk.playerModified = true; // Mark this chunk as modified by player action
 
-        // Recompute skylight for this and neighbors
-        this.recomputeLightingAround(cx, cz);
+        // Only recompute skylight when the block's light-opacity actually changed.
+        // Swapping two opaque blocks (stone→dirt) or two transparent blocks (air→water)
+        // has zero effect on the light map, so we skip the expensive flood-fill entirely.
+        const wasTransparent = this.isTransparentForLight(prevBlock);
+        const nowTransparent  = this.isTransparentForLight(blockType);
+        if (wasTransparent !== nowTransparent) {
+            // Recompute only the affected chunk; propagate to cardinal edge-neighbors only
+            // when the changed block sits on a chunk boundary (light bleeds across edges).
+            this.computeLightingForChunk(cx, cz);
+            if (lx === 0)                    this.computeLightingForChunk(cx - 1, cz);
+            if (lx === this.chunkSize - 1)   this.computeLightingForChunk(cx + 1, cz);
+            if (lz === 0)                    this.computeLightingForChunk(cx, cz - 1);
+            if (lz === this.chunkSize - 1)   this.computeLightingForChunk(cx, cz + 1);
+        }
 
-        // If a torch/magic candle was added or removed, only recompute lighting around it (not globally)
+        // If a torch/magic candle was added or removed, only recompute block lights around it
         const isEmissive = (b) => b === 25 || b === 29 || b === 64 || b === 65;
         if (isEmissive(prevBlock) || isEmissive(blockType)) {
-            // Only recompute block lights in nearby chunks to avoid global recalc lag
             this.propagateBlockLightLocalAround(wx, wy, wz);
         }
     }
@@ -1566,7 +1587,7 @@ class VoxelWorld {
 
     isBlockSolid(blockType) {
         // Treat fluids and decorative blocks as non-solid for face culling/collision.
-        return blockType > 0 && blockType !== 5 && blockType !== 34 && blockType !== 11 && blockType !== 25 && blockType !== 29 && blockType !== 46 && blockType !== 47 && blockType !== 48 && blockType !== 64 && blockType !== 65;
+        return blockType > 0 && blockType !== 5 && blockType !== 34 && blockType !== 11 && blockType !== 25 && blockType !== 29 && blockType !== 46 && blockType !== 47 && blockType !== 48 && blockType !== 64 && blockType !== 65 && blockType !== 69;
     }
 
     /**
@@ -1604,6 +1625,8 @@ class VoxelWorld {
             56,             // connecter block
             57, 58, 59, 60, 61, 62, 63 // rainbow cloth variants
             ,64, 65         // red/blue sconces
+            ,69             // tall grass
+            ,70             // anvil
         ]);
         return placeable.has(blockType);
     }
@@ -1625,12 +1648,12 @@ class VoxelWorld {
 
                     let hasVisibleFace = false;
                     // Check 6 neighbors
-                    if (this.getBlock(wx + 1, wy, wz) === 0) hasVisibleFace = true;
-                    if (this.getBlock(wx - 1, wy, wz) === 0) hasVisibleFace = true;
-                    if (this.getBlock(wx, wy + 1, wz) === 0) hasVisibleFace = true;
-                    if (this.getBlock(wx, wy - 1, wz) === 0) hasVisibleFace = true;
-                    if (this.getBlock(wx, wy, wz + 1) === 0) hasVisibleFace = true;
-                    if (this.getBlock(wx, wy, wz - 1) === 0) hasVisibleFace = true;
+                    if (!this.isBlockSolid(this.getBlock(wx + 1, wy, wz))) hasVisibleFace = true;
+                    if (!this.isBlockSolid(this.getBlock(wx - 1, wy, wz))) hasVisibleFace = true;
+                    if (!this.isBlockSolid(this.getBlock(wx, wy + 1, wz))) hasVisibleFace = true;
+                    if (!this.isBlockSolid(this.getBlock(wx, wy - 1, wz))) hasVisibleFace = true;
+                    if (!this.isBlockSolid(this.getBlock(wx, wy, wz + 1))) hasVisibleFace = true;
+                    if (!this.isBlockSolid(this.getBlock(wx, wy, wz - 1))) hasVisibleFace = true;
 
                     if (hasVisibleFace) {
                         visibleBlocks.push({ x: wx, y: wy, z: wz, blockType });
@@ -1683,7 +1706,9 @@ class BlockMesher {
             62: { x: 3, y: 0 },     // Indigo cloth
             63: { x: 3, y: 0 },     // Violet cloth
             64: { x: 1, y: 3 },     // Red sconce (torch tile, red emissive)
-            65: { x: 1, y: 3 }      // Blue sconce (torch tile, blue emissive)
+            65: { x: 1, y: 3 },     // Blue sconce (torch tile, blue emissive)
+            69: { x: 1, y: 0 },     // Tall grass (reuse grass tile)
+            70: { x: 2, y: 0 }      // Anvil (reuse stone tile)
         };
 
         // Per-block tint multipliers for cloth color variants.
@@ -1757,6 +1782,10 @@ class BlockMesher {
         const blueSconceUvs = [];
         const blueSconceColors = [];
         const blueSconceIndices = [];
+        const tallGrassPositions = [];
+        const tallGrassUvs = [];
+        const tallGrassColors = [];
+        const tallGrassIndices = [];
         const lavaPositions = [];
         const lavaUvs = [];
         const lavaColors = [];
@@ -1797,6 +1826,9 @@ class BlockMesher {
             } else if (blockType === 65) {
                 // Blue sconce uses torch-like geometry with blue emissive material.
                 this.addTorchGeometry(x, y, z, scale, blueSconcePositions, blueSconceUvs, blueSconceColors, blueSconceIndices, null);
+            } else if (blockType === 69) {
+                // Tall grass as crossed flat quads (X shape)
+                this.addCrossedPlantGeometry(x, y, z, 69, scale, tallGrassPositions, tallGrassUvs, tallGrassColors, tallGrassIndices);
             } else {
                 // For each visible block, emit quads for exposed faces
                 this.addBlockFaces(x, y, z, blockType, scale, positions, uvs, colors, indices, null);
@@ -1805,7 +1837,7 @@ class BlockMesher {
 
         console.log(`Mesh has ${positions.length / 3} vertices, ${indices.length} indices`);
         
-        if (positions.length === 0 && waterPositions.length === 0 && portalPositions.length === 0 && lavaPositions.length === 0) {
+        if (positions.length === 0 && waterPositions.length === 0 && portalPositions.length === 0 && lavaPositions.length === 0 && tallGrassPositions.length === 0) {
             console.log('No positions, returning null mesh');
             return null;
         }
@@ -2086,6 +2118,37 @@ class BlockMesher {
             else mesh = blueMesh;
         }
 
+        // Create tall grass mesh (crossed flat quads)
+        if (tallGrassPositions.length > 0) {
+            const tallGrassGeometry = new THREE.BufferGeometry();
+            tallGrassGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tallGrassPositions), 3));
+            tallGrassGeometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(tallGrassUvs), 2));
+            tallGrassGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(tallGrassColors), 3));
+
+            let tallGrassIndexArray;
+            if (tallGrassIndices.length < 65535) {
+                tallGrassIndexArray = new Uint16Array(tallGrassIndices);
+            } else {
+                tallGrassIndexArray = new Uint32Array(tallGrassIndices);
+            }
+            tallGrassGeometry.setIndex(new THREE.BufferAttribute(tallGrassIndexArray, 1));
+            tallGrassGeometry.computeVertexNormals();
+
+            const tallGrassMaterial = new THREE.MeshLambertMaterial({
+                map: this.textureAtlas,
+                color: 0xb8ff9a,
+                transparent: false,
+                alphaTest: 0.5,
+                depthWrite: true,
+                side: THREE.DoubleSide,
+                vertexColors: true
+            });
+
+            const tallGrassMesh = new THREE.Mesh(tallGrassGeometry, tallGrassMaterial);
+            if (mesh) mesh.add(tallGrassMesh);
+            else mesh = tallGrassMesh;
+        }
+
         console.log('Mesh created successfully');
 
         return mesh;
@@ -2179,6 +2242,44 @@ class BlockMesher {
         // Top gold flame (use torch block UV 25)
         const flameSize = s * 0.22;
         addSmallCube(centerX, segmentHeight * 2.0, centerZ, flameSize, 25);
+    }
+
+    addCrossedPlantGeometry(wx, y, wz, uvBlockType, scale, positions, uvs, colors, indices) {
+        const uv = this.getBlockUVs(uvBlockType);
+        const s = scale;
+        const px = wx * s;
+        const py = y * s;
+        const pz = wz * s;
+        const centerX = px + s * 0.5;
+        const centerZ = pz + s * 0.5;
+        const lf = this.world.getCombinedLight(wx, y, wz);
+
+        const addQuad = (v0, v1, v2, v3) => {
+            const idx = positions.length / 3;
+            positions.push(...v0, ...v1, ...v2, ...v3);
+            uvs.push(
+                uv.minU, uv.maxV,
+                uv.minU, uv.minV,
+                uv.maxU, uv.minV,
+                uv.maxU, uv.maxV
+            );
+            colors.push(lf, lf, lf, lf, lf, lf, lf, lf, lf, lf, lf, lf);
+            indices.push(idx, idx + 1, idx + 2, idx, idx + 2, idx + 3);
+        };
+
+        // Two full-height crossed planes (X shape)
+        addQuad(
+            [px, py, pz],
+            [px, py + s, pz],
+            [px + s, py + s, pz + s],
+            [px + s, py, pz + s]
+        );
+        addQuad(
+            [px + s, py, pz],
+            [px + s, py + s, pz],
+            [px, py + s, pz + s],
+            [px, py, pz + s]
+        );
     }
 
     addBlockFaces(wx, y, wz, blockType, scale, positions, uvs, colors, indices, linePositions) {
@@ -2326,6 +2427,7 @@ class Player {
         this.xpToNext = 100;
         this.isDead = false;
         this.invulnerableUntil = 0; // Damage cooldown
+        this.shieldRaised = false;
 
         // Input state
         this.keys = {};
@@ -2876,21 +2978,51 @@ class Player {
                 baseDamage = 4; // Stone Sword damage
             } else if (equipped.type === 32) {
                 baseDamage = 6; // Golden Sword damage
+            } else if (equipped.type === 71) {
+                baseDamage = 8; // Ruby Sword damage
             }
             // Apply damage bonus from scrolls
             if (equipped.damageBonus) {
                 damageBonus = equipped.damageBonus;
             }
+            // Apply reforge damage bonus (Masterfull +7%)
+            const reforgeStats = this.getWeaponReforgeStats(equipped);
+            damageBonus += reforgeStats.damageBonusPct;
         } else if (equipped === 22) {
             // Handle legacy numeric format
             baseDamage = 4;
         } else if (equipped === 32) {
             baseDamage = 6;
+        } else if (equipped === 71) {
+            baseDamage = 8;
         }
         
         // Apply damage bonus as percentage
         const totalDamage = baseDamage * (1 + damageBonus / 100);
         return totalDamage;
+    }
+
+    getWeaponReforgeStats(weaponItem) {
+        const none = { damageBonusPct: 0, armorPiercePct: 0, iframeSkipChance: 0 };
+        if (!weaponItem || typeof weaponItem !== 'object') return none;
+
+        const name = String(weaponItem.reforgeName || '').toLowerCase();
+        if (name === 'masterfull') {
+            return { damageBonusPct: 7, armorPiercePct: 0, iframeSkipChance: 0 };
+        }
+        if (name === 'nimble') {
+            return { damageBonusPct: 0, armorPiercePct: 4, iframeSkipChance: 0 };
+        }
+        if (name === 'sleek') {
+            return { damageBonusPct: 0, armorPiercePct: 0, iframeSkipChance: 0.02 };
+        }
+
+        // Backward-compatible support if explicit numeric fields are ever used.
+        return {
+            damageBonusPct: Number(weaponItem.reforgeDamageBonusPct || 0),
+            armorPiercePct: Number(weaponItem.reforgeArmorPiercePct || 0),
+            iframeSkipChance: Number(weaponItem.reforgeIframeSkipChance || 0)
+        };
     }
 
     getArmorReduction() {
@@ -2949,12 +3081,22 @@ class Player {
         if (!this.survivalMode || this.isDead) return;
         
         const now = performance.now ? performance.now() : Date.now();
-        // Invulnerability period (0.5s)
-        if (now < this.invulnerableUntil) return;
+        // Invulnerability period (0.5s). Sleek reforge has a chance to bypass this.
+        if (now < this.invulnerableUntil) {
+            let bypassIframes = false;
+            if (attacker && attacker.equipment && attacker.equipment.mainHand && typeof attacker.getWeaponReforgeStats === 'function') {
+                const rf = attacker.getWeaponReforgeStats(attacker.equipment.mainHand);
+                if (rf.iframeSkipChance > 0 && Math.random() < rf.iframeSkipChance) {
+                    bypassIframes = true;
+                }
+            }
+            if (!bypassIframes) return;
+        }
         
         // Check for wood shield reflection (3% chance)
         const offHandItem = this.equipment.offHand;
         const hasWoodShield = (offHandItem && typeof offHandItem === 'object' && offHandItem.type === 23) || offHandItem === 23;
+        const shieldRaised = !!this.shieldRaised;
         
         if (hasWoodShield && attacker && Math.random() < 0.03) {
             // Reflect damage back to attacker
@@ -2967,7 +3109,18 @@ class Player {
         
         // Apply armor damage reduction
         const armorReduction = this.getArmorReduction();
-        const damageMultiplier = 1 - (armorReduction / 100);
+        let effectiveArmorReduction = armorReduction;
+        if (attacker && attacker.equipment && attacker.equipment.mainHand && typeof attacker.getWeaponReforgeStats === 'function') {
+            const rf = attacker.getWeaponReforgeStats(attacker.equipment.mainHand);
+            if (rf.armorPiercePct > 0) {
+                effectiveArmorReduction = Math.max(0, armorReduction - rf.armorPiercePct);
+            }
+        }
+        let damageMultiplier = 1 - (effectiveArmorReduction / 100);
+        if (hasWoodShield && shieldRaised) {
+            // Raised shield provides strong frontal-style mitigation.
+            damageMultiplier *= 0.35;
+        }
         const actualDamage = amount * damageMultiplier;
         
         this.health = Math.max(0, this.health - actualDamage);
@@ -2984,8 +3137,8 @@ class Player {
             }
         }
         
-        if (armorReduction > 0) {
-            console.log(`Player took ${actualDamage.toFixed(1)} damage (${amount} reduced by ${armorReduction}% armor)! Health: ${this.health}/${this.maxHealth}`);
+        if (effectiveArmorReduction > 0) {
+            console.log(`Player took ${actualDamage.toFixed(1)} damage (${amount} reduced by ${effectiveArmorReduction}% armor)! Health: ${this.health}/${this.maxHealth}`);
         } else {
             console.log(`Player took ${actualDamage} damage! Health: ${this.health}/${this.maxHealth}`);
         }
@@ -5169,6 +5322,8 @@ class DroppedItem {
                 36: '#1a1a2e', // Gloom (very dark blue/black)
                 41: '#e6d28a', // Map
                 42: '#6f7078', // Cauldron
+                70: '#585d66', // Anvil
+                71: '#e81828', // Ruby Sword
                 43: '#d42424', // Healing Potion
                 44: '#7fd8ff', // Potion of Chilling
                 49: '#7CFC00', // Astara Scroll (lime)
@@ -5270,26 +5425,94 @@ class DroppedItem {
 // straight and damages the first entity it hits.  It is managed by the Game
 // instance via the `projectiles` array.
 class Projectile {
-    constructor(position, direction, speed, damage, owner) {
+    constructor(position, direction, speed, damage, owner, kind = 'bullet', hitCause = 'projectile') {
         this.position = position.clone();
         this.velocity = direction.clone().normalize().multiplyScalar(speed);
         this.damage = damage;
         this.owner = owner;
+        this.kind = kind;
+        this.hitCause = hitCause;
         this.mesh = null;
         this.lifetime = 0;
         this.maxLifetime = 5; // seconds before disappearing
+        this.trailMotes = [];
         this.createMesh();
     }
 
     createMesh() {
-        const geom = new THREE.BoxGeometry(0.2, 0.2, 0.2);
-        const mat = new THREE.MeshBasicMaterial({ color: 0xaaaaaa });
+        const isArrow = this.kind === 'arrow' || this.kind === 'explosive_arrow';
+        const isRubyBeam = this.kind === 'ruby_beam';
+        const geom = isRubyBeam
+            ? new THREE.BoxGeometry(0.10, 0.10, 1.15)
+            : (isArrow
+                ? new THREE.BoxGeometry(0.08, 0.08, 0.42)
+                : new THREE.BoxGeometry(0.2, 0.2, 0.2));
+        let color = 0xaaaaaa;
+        if (this.kind === 'arrow') color = 0x8b6b3f;
+        if (this.kind === 'explosive_arrow') color = 0xff7a22;
+        if (isRubyBeam) color = 0xff2244;
+        const mat = new THREE.MeshBasicMaterial({
+            color,
+            transparent: isRubyBeam,
+            opacity: isRubyBeam ? 0.96 : 1.0
+        });
         this.mesh = new THREE.Mesh(geom, mat);
         this.mesh.position.copy(this.position);
+        if (isArrow || isRubyBeam) {
+            const dir = this.velocity.clone().normalize();
+            const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+            this.mesh.quaternion.copy(q);
+        }
         // simple lighting hack so bullet is visible
         this.mesh.castShadow = false;
         if (window.game && game.scene) {
             try { game.scene.add(this.mesh); } catch (e) {}
+        }
+    }
+
+    spawnRubyMote(game) {
+        if (!game || !game.scene || this.kind !== 'ruby_beam') return;
+        const geo = new THREE.SphereGeometry(0.03 + Math.random() * 0.02, 6, 6);
+        const mat = new THREE.MeshBasicMaterial({ color: 0xff3355, transparent: true, opacity: 0.85 });
+        const mote = new THREE.Mesh(geo, mat);
+
+        const back = this.velocity.clone().normalize().multiplyScalar(-0.35);
+        mote.position.copy(this.position).add(back);
+        mote.position.x += (Math.random() - 0.5) * 0.08;
+        mote.position.y += (Math.random() - 0.5) * 0.08;
+        mote.position.z += (Math.random() - 0.5) * 0.08;
+
+        game.scene.add(mote);
+        this.trailMotes.push({
+            mesh: mote,
+            life: 0,
+            maxLife: 0.16 + Math.random() * 0.14,
+            vel: new THREE.Vector3(
+                (Math.random() - 0.5) * 0.04,
+                (Math.random() - 0.5) * 0.04,
+                (Math.random() - 0.5) * 0.04
+            )
+        });
+    }
+
+    updateRubyMotes(deltaTime, game) {
+        for (let i = this.trailMotes.length - 1; i >= 0; i--) {
+            const p = this.trailMotes[i];
+            p.life += deltaTime;
+
+            p.mesh.position.x += p.vel.x;
+            p.mesh.position.y += p.vel.y;
+            p.mesh.position.z += p.vel.z;
+
+            const t = Math.min(1, p.life / p.maxLife);
+            if (p.mesh.material) p.mesh.material.opacity = Math.max(0, 0.85 * (1 - t));
+
+            if (p.life >= p.maxLife) {
+                try { game.scene.remove(p.mesh); } catch (e) {}
+                try { p.mesh.geometry.dispose(); } catch (e) {}
+                try { p.mesh.material.dispose(); } catch (e) {}
+                this.trailMotes.splice(i, 1);
+            }
         }
     }
 
@@ -5302,7 +5525,20 @@ class Projectile {
 
         const move = this.velocity.clone().multiplyScalar(deltaTime * 60);
         this.position.add(move);
-        if (this.mesh) this.mesh.position.copy(this.position);
+        if (this.mesh) {
+            this.mesh.position.copy(this.position);
+            if (this.kind === 'arrow' || this.kind === 'explosive_arrow' || this.kind === 'ruby_beam') {
+                const dir = this.velocity.clone().normalize();
+                const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+                this.mesh.quaternion.copy(q);
+            }
+        }
+
+        if (this.kind === 'ruby_beam') {
+            this.spawnRubyMote(game);
+            this.spawnRubyMote(game);
+            this.updateRubyMotes(deltaTime, game);
+        }
 
         // world collision
         const x = Math.floor(this.position.x);
@@ -5310,6 +5546,9 @@ class Projectile {
         const z = Math.floor(this.position.z);
         const block = game.world.getBlock(x, y, z);
         if (block !== 0) {
+            if (this.kind === 'explosive_arrow' && game && typeof game.explodeTNT === 'function') {
+                game.explodeTNT(x, y, z, 2, false);
+            }
             this.destroy(game);
             return false;
         }
@@ -5328,7 +5567,10 @@ class Projectile {
                 let died = false;
                 if (ent.takeDamage) died = !!ent.takeDamage(this.damage, this.owner);
                 if (died && game && typeof game.finalizeEnemyDeath === 'function') {
-                    game.finalizeEnemyDeath(ent, 'musket');
+                    game.finalizeEnemyDeath(ent, this.hitCause || 'projectile');
+                }
+                if (this.kind === 'explosive_arrow' && game && typeof game.explodeTNT === 'function') {
+                    game.explodeTNT(Math.floor(this.position.x), Math.floor(this.position.y), Math.floor(this.position.z), 2, false);
                 }
                 this.destroy(game);
                 return false;
@@ -5339,6 +5581,9 @@ class Projectile {
             const distSq = this.position.distanceToSquared(game.otherPlayer.position);
             if (distSq < 0.7 * 0.7) {
                 if (game.otherPlayer.takeDamage) game.otherPlayer.takeDamage(this.damage, this.owner);
+                if (this.kind === 'explosive_arrow' && game && typeof game.explodeTNT === 'function') {
+                    game.explodeTNT(Math.floor(this.position.x), Math.floor(this.position.y), Math.floor(this.position.z), 2, false);
+                }
                 this.destroy(game);
                 return false;
             }
@@ -5348,8 +5593,16 @@ class Projectile {
     }
 
     destroy(game) {
+        for (const p of this.trailMotes) {
+            try { game.scene.remove(p.mesh); } catch (e) {}
+            try { p.mesh.geometry.dispose(); } catch (e) {}
+            try { p.mesh.material.dispose(); } catch (e) {}
+        }
+        this.trailMotes = [];
         if (this.mesh) {
             try { game.scene.remove(this.mesh); } catch (e) {}
+            try { this.mesh.geometry.dispose(); } catch (e) {}
+            try { this.mesh.material.dispose(); } catch (e) {}
             this.mesh = null;
         }
     }
@@ -5367,7 +5620,7 @@ class ItemManager {
         // Load individual item textures (item_1.png, item_2.png, etc.)
         const textureLoader = new THREE.TextureLoader();
         // load textures for known item blocks
-        for (let i = 1; i <= 44; i++) {
+        for (let i = 1; i <= 71; i++) {
             textureLoader.load(
                 `item_${i}.png`,
                 (texture) => {
@@ -5641,12 +5894,31 @@ class Game {
 
         // Sound effects
         this.musketSound = new Audio('Musket.mp3');
+        this.musketSound.preload = 'auto';
         this.musketSound.volume = 0.7; // a bit louder than UI clicks
-        this.explosionSound = new Audio('Explotion.ogg');
+        this.bowSound = new Audio('bow_shot.mp3');
+        this.bowSound.preload = 'auto';
+        this.bowSound.volume = 0.65;
+        this.bowSoundMissing = false;
+        this.bowSound.addEventListener('error', () => {
+            this.bowSoundMissing = true;
+            console.log('bow_shot.mp3 missing/unreadable. Using musket sound fallback for bow.');
+        });
+        this.explosionSound = new Audio('explosion.mp3');
         this.explosionSound.volume = 0.85;
+        this.sizzleSound = new Audio('match-sizzle.mp3');
+        this.sizzleSound.volume = 0.7;
         this.moneySound = new Audio('money.mp3');
         this.moneySound.preload = 'auto';
         this.moneySound.volume = 0.8;
+        this.swordWiffSound = new Audio('sword_wiff.mp3');
+        this.swordWiffSound.preload = 'auto';
+        this.swordWiffSound.volume = 0.65;
+        this.beamSound = new Audio('beam.mp3');
+        this.beamSound.preload = 'auto';
+        this.beamSound.volume = 0.75;
+        this.lastRubyBeamTime = 0;
+        this.rubyBeamCooldownMs = 450;
 
         
         // Block type to name mapping
@@ -5657,11 +5929,17 @@ class Game {
         // being in the placeable set, but we do allow it there so creative
         // users can obtain it via the block picker.
         const MUSKET_TYPE = 37;
+        const BOW_TYPE = 66;
+        const ARROW_TYPE = 67;
+        const EXPLOSIVE_ARROW_TYPE = 68;
+        const TALL_GRASS_TYPE = 69;
+        const RUBY_SWORD_TYPE = 71;
         const SLIME_TYPE = 38;
         const MAN_POSTER_TYPE = 39;
         const TNT_TYPE = 40;
         const MAP_TYPE = 41;
         const CAULDRON_TYPE = 42;
+        const ANVIL_TYPE = 70;
         const HEALING_POTION_TYPE = 43;
         const CHILLING_POTION_TYPE = 44;
         const STRUCTURE_BLOCK_TYPE = 45;
@@ -5720,16 +5998,22 @@ class Game {
             30: 'Chisel',
             31: 'Cloud Pillow',
             32: 'Golden Sword',
+            [RUBY_SWORD_TYPE]: 'Ruby Sword',
             33: 'Grim Stone',
             34: 'Lava',
             35: 'Smiteth Scroll',
             36: 'Gloom',
             [MUSKET_TYPE]: 'Musket',  // new weapon
+            [BOW_TYPE]: 'Bow',
+            [ARROW_TYPE]: 'Arrow',
+            [EXPLOSIVE_ARROW_TYPE]: 'Explosive Arrow',
+            [TALL_GRASS_TYPE]: 'Tall Grass',
             [SLIME_TYPE]: 'Slime',    // dropped by slain slimes
             [MAN_POSTER_TYPE]: 'Man Poster',
             [TNT_TYPE]: 'TNT',
             [MAP_TYPE]: 'Map',
             [CAULDRON_TYPE]: 'Cauldron',
+            [ANVIL_TYPE]: 'Anvil',
             [HEALING_POTION_TYPE]: 'Healing Potion',
             [CHILLING_POTION_TYPE]: 'Potion of Chilling',
             [STRUCTURE_BLOCK_TYPE]: 'Structure Block',
@@ -5757,11 +6041,17 @@ class Game {
 
         // push constants onto game instance so other methods can refer to them
         this.MUSKET_TYPE = MUSKET_TYPE;
+        this.BOW_TYPE = BOW_TYPE;
+        this.ARROW_TYPE = ARROW_TYPE;
+        this.EXPLOSIVE_ARROW_TYPE = EXPLOSIVE_ARROW_TYPE;
+        this.TALL_GRASS_TYPE = TALL_GRASS_TYPE;
+        this.RUBY_SWORD_TYPE = RUBY_SWORD_TYPE;
         this.SLIME_TYPE = SLIME_TYPE;
         this.MAN_POSTER_TYPE = MAN_POSTER_TYPE;
         this.TNT_TYPE = TNT_TYPE;
         this.MAP_TYPE = MAP_TYPE;
         this.CAULDRON_TYPE = CAULDRON_TYPE;
+        this.ANVIL_TYPE = ANVIL_TYPE;
         this.HEALING_POTION_TYPE = HEALING_POTION_TYPE;
         this.CHILLING_POTION_TYPE = CHILLING_POTION_TYPE;
         this.STRUCTURE_BLOCK_TYPE = STRUCTURE_BLOCK_TYPE;
@@ -5952,10 +6242,18 @@ class Game {
         this.player.gameInstance = this; // Reference to game for curse effects
         // weapon visuals bookkeeping
         this.currentHandWeaponType = null;
+        this.currentOffhandWeaponType = null;
         this.currentPlayerWeaponType = null;
         this.otherPlayerWeaponType = null;
         this.handWeaponMesh = null;
+        this.handShieldMesh = null;
+        this.handOffhandWeaponMesh = null;
+        this.shieldRaiseVisual = 0;
+        this.actionSwingUntil = 0;
+        this.actionSwingDuration = 170;
         this.playerModelWeapon = null;
+        this.playerModelShield = null;
+        this.playerModelOffhandWeapon = null;
         this.otherPlayerWeaponMesh = null;
         const initialSpawn = this.getSafeSpawnPositionNear(0, 0, 4);
         this.player.position.copy(initialSpawn);
@@ -6038,8 +6336,11 @@ class Game {
         this.thirdPersonDistance = 4.0;
         this.thirdCamera = new THREE.PerspectiveCamera(fov, window.innerWidth / window.innerHeight, 0.1, 1000);
 
-        // Hotbar selection index (0..7)
+        // Hotbar selection index for the 2D block bar.
         this.hotbarIndex = 0;
+        this.gearHotbarIndex = 0;
+        this.hotbarScrollMode = 'blocks';
+        this.leftMouseDown = false;
 
         // Debug mode: when true, render simple Box meshes per visible block (slow)
         this.debugMode = true;
@@ -6064,6 +6365,7 @@ class Game {
         this.opencandlePos = null; // Currently open candle position
         this.cauldronStorage = new Map(); // Map of 'x,y,z' -> [3 slots] for potion brewing
         this.openCauldronPos = null;
+        this.openAnvilPos = null; // Currently open anvil position
         this.connectorData = new Map(); // Map of 'x,y,z' -> { code, dir, letter }
         this.pendingConnectorData = null; // Set through connector UI before placement
         this.paintings = []; // [{mesh, backX, backY, backZ}] — placed Man Poster paintings
@@ -6705,6 +7007,27 @@ class Game {
             const handle = new THREE.Mesh(handleGeo, handleMat);
             handle.position.set(0, 0.025, 0);
             g.add(handle);
+        } else if (type === this.RUBY_SWORD_TYPE) {
+            // Ruby sword: same model as other swords, blade uses ruby.png
+            if (!this.rubySwordTexture) {
+                const textureLoader = new THREE.TextureLoader();
+                this.rubySwordTexture = textureLoader.load('ruby.png');
+                this.rubySwordTexture.magFilter = THREE.NearestFilter;
+                this.rubySwordTexture.minFilter = THREE.NearestFilter;
+            }
+
+            const bladeLength = 0.6;
+            const bladeGeo = new THREE.BoxGeometry(0.05, bladeLength, 0.02);
+            const bladeMat = new THREE.MeshLambertMaterial({ map: this.rubySwordTexture, color: 0xffffff });
+            const blade = new THREE.Mesh(bladeGeo, bladeMat);
+            blade.position.set(0, -bladeLength / 2, 0);
+            g.add(blade);
+
+            const handleGeo = new THREE.BoxGeometry(0.06, 0.15, 0.06);
+            const handleMat = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+            const handle = new THREE.Mesh(handleGeo, handleMat);
+            handle.position.set(0, 0.025, 0);
+            g.add(handle);
         } else if (type === 23) {
             // wood shield is square-ish
             const shieldGeo = new THREE.BoxGeometry(0.4, 0.4, 0.05);
@@ -6723,13 +7046,32 @@ class Game {
             const stock = new THREE.Mesh(stockGeo, stockMat);
             stock.position.set(0, 0, 0.2);
             g.add(stock);
+        } else if (type === this.BOW_TYPE) {
+            const bowMat = new THREE.MeshLambertMaterial({ color: 0x8B5A2B });
+            const topArm = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.24, 0.04), bowMat);
+            const midArm = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.28, 0.04), bowMat);
+            const botArm = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.24, 0.04), bowMat);
+            topArm.position.set(0, 0.18, -0.18);
+            midArm.position.set(0, 0.0, -0.24);
+            botArm.position.set(0, -0.18, -0.18);
+            g.add(topArm, midArm, botArm);
+
+            const stringMat = new THREE.MeshLambertMaterial({ color: 0xf0e5c8 });
+            const stringGeo = new THREE.BoxGeometry(0.01, 0.54, 0.01);
+            const string = new THREE.Mesh(stringGeo, stringMat);
+            string.position.set(0.02, 0, -0.06);
+            g.add(string);
         }
         return g;
     }
 
     updateHandItem() {
         const equipped = this.player && this.player.equipment ? this.player.equipment.mainHand : 0;
-        const type = (equipped && typeof equipped === 'object') ? equipped.type : equipped;
+        const equippedType = (equipped && typeof equipped === 'object') ? equipped.type : equipped;
+        const selectedType = this.player ? (parseInt(this.player.selectedBlock) || 0) : 0;
+        const type = this.isWeaponVisualType(equippedType)
+            ? equippedType
+            : (this.isWeaponVisualType(selectedType) ? selectedType : equippedType);
 
         if (type !== this.currentHandWeaponType) {
             // rebuild
@@ -6737,40 +7079,180 @@ class Game {
                 this.camera.remove(this.handWeaponMesh);
                 this.handWeaponMesh = null;
             }
-            if (type === 22 || type === 32 || type === 23 || type === this.MUSKET_TYPE) {
+            if (this.isWeaponVisualType(type)) {
                 this.handWeaponMesh = this.createWeaponMesh(type);
                 // position a little left/center for fists effect
-                this.handWeaponMesh.position.set(0.4, -0.4, -1);
+                this.handWeaponMesh.position.set(0.4, -0.18, -0.95);
                 this.handWeaponMesh.rotation.set(0.2, 0, 0);
                 if (this.camera) this.camera.add(this.handWeaponMesh);
             }
             this.currentHandWeaponType = type;
         }
+
+        const actionSwing = this.getActionArmSwing();
+        if (this.handWeaponMesh) {
+            this.handWeaponMesh.position.set(
+                0.4 + Math.sin(actionSwing * Math.PI) * 0.08,
+                -0.18 - actionSwing * 0.22,
+                -0.95 - actionSwing * 0.08
+            );
+            this.handWeaponMesh.rotation.set(
+                0.2 + actionSwing * 1.15,
+                actionSwing * 0.28,
+                -actionSwing * 0.45
+            );
+        }
+
         // hide block cube when weapon present
         if (this.handBlock) {
-            this.handBlock.visible = !(type === 22 || type === 32 || type === 23);
+            this.handBlock.visible = !this.isWeaponVisualType(type);
         }
+    }
+
+    updateOffhandShieldVisual() {
+        if (!this.player) return;
+
+        const offHand = this.player.equipment ? this.player.equipment.offHand : 0;
+        const offType = (offHand && typeof offHand === 'object') ? offHand.type : offHand;
+        const hasShield = offType === 23;
+        const hasOffhandWeapon = this.isWeaponVisualType(offType);
+
+        const target = (hasShield && this.player.shieldRaised) ? 1 : 0;
+        this.shieldRaiseVisual += (target - this.shieldRaiseVisual) * 0.38;
+
+        // First-person off-hand shield
+        if (!this.thirdPerson && hasShield) {
+            if (!this.handShieldMesh) this.handShieldMesh = this.createWeaponMesh(23);
+            if (this.handShieldMesh && this.camera && this.handShieldMesh.parent !== this.camera) {
+                try { this.camera.add(this.handShieldMesh); } catch (e) {}
+            }
+
+            const loweredPos = new THREE.Vector3(-0.38, -0.24, -0.86);
+            const raisedPos  = new THREE.Vector3(-0.08, 0.04, -0.50);
+            const loweredRot = new THREE.Euler(0.40, 1.10, 0.34);
+            const raisedRot  = new THREE.Euler(-0.02, 0.18, 0.00);
+
+            if (this.handShieldMesh) {
+                this.handShieldMesh.visible = true;
+                this.handShieldMesh.scale.set(1.9, 1.9, 1.9);
+                this.handShieldMesh.position.lerpVectors(loweredPos, raisedPos, this.shieldRaiseVisual);
+                this.handShieldMesh.rotation.x = loweredRot.x + (raisedRot.x - loweredRot.x) * this.shieldRaiseVisual;
+                this.handShieldMesh.rotation.y = loweredRot.y + (raisedRot.y - loweredRot.y) * this.shieldRaiseVisual;
+                this.handShieldMesh.rotation.z = loweredRot.z + (raisedRot.z - loweredRot.z) * this.shieldRaiseVisual;
+            }
+        } else if (this.handShieldMesh && this.handShieldMesh.parent) {
+            try { this.handShieldMesh.parent.remove(this.handShieldMesh); } catch (e) {}
+        }
+
+        // First-person off-hand non-shield weapon
+        if (!this.thirdPerson && hasOffhandWeapon && !hasShield) {
+            if (!this.handOffhandWeaponMesh || this.currentOffhandWeaponType !== offType) {
+                if (this.handOffhandWeaponMesh && this.handOffhandWeaponMesh.parent) {
+                    try { this.handOffhandWeaponMesh.parent.remove(this.handOffhandWeaponMesh); } catch (e) {}
+                }
+                this.handOffhandWeaponMesh = this.createWeaponMesh(offType);
+            }
+            if (this.handOffhandWeaponMesh && this.camera && this.handOffhandWeaponMesh.parent !== this.camera) {
+                try { this.camera.add(this.handOffhandWeaponMesh); } catch (e) {}
+            }
+            if (this.handOffhandWeaponMesh) {
+                this.handOffhandWeaponMesh.visible = true;
+                this.handOffhandWeaponMesh.scale.set(1.6, 1.6, 1.6);
+                this.handOffhandWeaponMesh.position.set(-0.44, -0.20, -0.90);
+                this.handOffhandWeaponMesh.rotation.set(0.34, 0.78, 0.28);
+            }
+        } else if (this.handOffhandWeaponMesh && this.handOffhandWeaponMesh.parent) {
+            try { this.handOffhandWeaponMesh.parent.remove(this.handOffhandWeaponMesh); } catch (e) {}
+        }
+
+        // Third-person off-hand shield on player model
+        if (this.thirdPerson && this.playerModel && hasShield) {
+            const leftHandPivot = this.playerModel && this.playerModel.userData && this.playerModel.userData.bodyParts
+                ? this.playerModel.userData.bodyParts.leftHandPivot
+                : null;
+            if (!this.playerModelShield) {
+                this.playerModelShield = this.createWeaponMesh(23);
+            }
+            if (this.playerModelShield.parent !== leftHandPivot) {
+                try {
+                    if (this.playerModelShield.parent) this.playerModelShield.parent.remove(this.playerModelShield);
+                    if (leftHandPivot) leftHandPivot.add(this.playerModelShield);
+                } catch (e) {}
+            }
+            this.playerModelShield.visible = true;
+            this.playerModelShield.scale.set(1, 1, 1);
+
+            const loweredPos = new THREE.Vector3(0.02, -0.03, 0.06);
+            const raisedPos  = new THREE.Vector3(0.08, 0.06, -0.04);
+            this.playerModelShield.position.lerpVectors(loweredPos, raisedPos, this.shieldRaiseVisual);
+            this.playerModelShield.rotation.set(
+                -0.18 + (-0.46 + 0.18) * this.shieldRaiseVisual,
+                Math.PI * 0.76 + (-0.34) * this.shieldRaiseVisual,
+                0.18 + (-0.24) * this.shieldRaiseVisual
+            );
+        } else if (this.playerModelShield && this.playerModelShield.parent) {
+            try { this.playerModelShield.parent.remove(this.playerModelShield); } catch (e) {}
+        }
+
+        // Third-person off-hand non-shield weapon on player model
+        if (this.thirdPerson && this.playerModel && hasOffhandWeapon && !hasShield) {
+            const leftHandPivot = this.playerModel && this.playerModel.userData && this.playerModel.userData.bodyParts
+                ? this.playerModel.userData.bodyParts.leftHandPivot
+                : null;
+            if (!this.playerModelOffhandWeapon || this.currentOffhandWeaponType !== offType) {
+                if (this.playerModelOffhandWeapon && this.playerModelOffhandWeapon.parent) {
+                    try { this.playerModelOffhandWeapon.parent.remove(this.playerModelOffhandWeapon); } catch (e) {}
+                }
+                this.playerModelOffhandWeapon = this.createWeaponMesh(offType);
+            }
+            if (this.playerModelOffhandWeapon && this.playerModelOffhandWeapon.parent !== leftHandPivot) {
+                try {
+                    if (this.playerModelOffhandWeapon.parent) this.playerModelOffhandWeapon.parent.remove(this.playerModelOffhandWeapon);
+                    if (leftHandPivot) leftHandPivot.add(this.playerModelOffhandWeapon);
+                } catch (e) {}
+            }
+            if (this.playerModelOffhandWeapon) {
+                this.playerModelOffhandWeapon.visible = true;
+                this.playerModelOffhandWeapon.scale.set(1, 1, 1);
+                this.playerModelOffhandWeapon.position.set(0.03, -0.04, 0.09);
+                this.playerModelOffhandWeapon.rotation.set(-0.2, Math.PI * 0.68, 0.16);
+            }
+        } else if (this.playerModelOffhandWeapon && this.playerModelOffhandWeapon.parent) {
+            try { this.playerModelOffhandWeapon.parent.remove(this.playerModelOffhandWeapon); } catch (e) {}
+        }
+
+        this.currentOffhandWeaponType = offType;
     }
 
     updatePlayerWeaponModel() {
         if (!this.playerModel) return;
         const equipped = this.player && this.player.equipment ? this.player.equipment.mainHand : 0;
         const type = (equipped && typeof equipped === 'object') ? equipped.type : equipped;
+        const rightHandPivot = this.playerModel && this.playerModel.userData && this.playerModel.userData.bodyParts
+            ? this.playerModel.userData.bodyParts.rightHandPivot
+            : null;
         if (type !== this.currentPlayerWeaponType) {
             // remove old weapon
             if (this.playerModelWeapon) {
-                this.playerModel.remove(this.playerModelWeapon);
+                if (this.playerModelWeapon.parent) this.playerModelWeapon.parent.remove(this.playerModelWeapon);
                 this.playerModelWeapon = null;
             }
-            if (type === 22 || type === 32 || type === 23 || type === this.MUSKET_TYPE) {
+            if (this.isWeaponVisualType(type)) {
                 this.playerModelWeapon = this.createWeaponMesh(type);
-                // position roughly at right side of torso
-                this.playerModelWeapon.position.set(0.4, 0.0, 0.1);
-                // rotate to point forward
-                this.playerModelWeapon.rotation.y = -Math.PI/2;
-                this.playerModel.add(this.playerModelWeapon);
+                this.playerModelWeapon.position.set(-0.03, -0.04, 0.09);
+                this.playerModelWeapon.rotation.set(-0.2, -Math.PI * 0.68, -0.16);
+                if (rightHandPivot) {
+                    rightHandPivot.add(this.playerModelWeapon);
+                } else {
+                    this.playerModel.add(this.playerModelWeapon);
+                }
             }
             this.currentPlayerWeaponType = type;
+        } else if (this.playerModelWeapon && rightHandPivot && this.playerModelWeapon.parent !== rightHandPivot) {
+            try {
+                if (this.playerModelWeapon.parent) this.playerModelWeapon.parent.remove(this.playerModelWeapon);
+                rightHandPivot.add(this.playerModelWeapon);
+            } catch (e) {}
         }
     }
 
@@ -6809,6 +7291,13 @@ class Game {
         // Rotate for visual effect
         this.handBlock.rotation.x += 0.01;
         this.handBlock.rotation.y += 0.02;
+
+        const actionSwing = this.getActionArmSwing();
+        this.handBlock.position.set(
+            0.5 + Math.sin(actionSwing * Math.PI) * 0.07,
+            -0.5 - actionSwing * 0.16,
+            -1.2 - actionSwing * 0.08
+        );
     }
 
     createPlayerModel() {
@@ -6837,12 +7326,56 @@ class Game {
         head.castShadow = true;
         group.add(head);
 
-        // Legs (single block for simplicity)
-        const legsGeo = new THREE.BoxGeometry(0.6, 0.8, 0.35);
-        const legs = new THREE.Mesh(legsGeo, material);
-        legs.position.y = -0.9;
-        legs.castShadow = true;
-        group.add(legs);
+        // Arms and legs use pivots so we can animate walking.
+        const leftArmPivot = new THREE.Group();
+        leftArmPivot.position.set(-0.42, 0.45, 0);
+        const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.2), material);
+        leftArm.position.set(0, -0.36, 0);
+        leftArm.castShadow = true;
+        leftArmPivot.add(leftArm);
+        group.add(leftArmPivot);
+
+        const rightArmPivot = new THREE.Group();
+        rightArmPivot.position.set(0.42, 0.45, 0);
+        const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.2), material);
+        rightArm.position.set(0, -0.36, 0);
+        rightArm.castShadow = true;
+        rightArmPivot.add(rightArm);
+        group.add(rightArmPivot);
+
+        const leftLegPivot = new THREE.Group();
+        leftLegPivot.position.set(-0.16, -0.52, 0);
+        const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.82, 0.24), material);
+        leftLeg.position.set(0, -0.41, 0);
+        leftLeg.castShadow = true;
+        leftLegPivot.add(leftLeg);
+        group.add(leftLegPivot);
+
+        const rightLegPivot = new THREE.Group();
+        rightLegPivot.position.set(0.16, -0.52, 0);
+        const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.82, 0.24), material);
+        rightLeg.position.set(0, -0.41, 0);
+        rightLeg.castShadow = true;
+        rightLegPivot.add(rightLeg);
+        group.add(rightLegPivot);
+
+        // Hand pivots used for minecraft-like held item placement.
+        const rightHandPivot = new THREE.Group();
+        rightHandPivot.position.set(0, -0.66, 0.06);
+        rightArmPivot.add(rightHandPivot);
+
+        const leftHandPivot = new THREE.Group();
+        leftHandPivot.position.set(0, -0.66, 0.06);
+        leftArmPivot.add(leftHandPivot);
+
+        group.userData.bodyParts = {
+            leftArmPivot,
+            rightArmPivot,
+            leftLegPivot,
+            rightLegPivot,
+            leftHandPivot,
+            rightHandPivot
+        };
 
         // Add name label above player
         const canvas = document.createElement('canvas');
@@ -7027,6 +7560,33 @@ class Game {
         this.playerModel.position.copy(this.player.position);
         // Align model yaw (rotate to face same direction as camera yaw)
         this.playerModel.rotation.y = this.player.yaw;
+
+        const parts = this.playerModel.userData ? this.playerModel.userData.bodyParts : null;
+        if (parts) {
+            const vx = this.player.velocity ? (this.player.velocity.x || 0) : 0;
+            const vz = this.player.velocity ? (this.player.velocity.z || 0) : 0;
+            const horizSpeed = Math.hypot(vx, vz);
+            const moving = horizSpeed > 0.06;
+            const time = Date.now() * 0.01;
+            const walkRate = moving ? Math.min(1.7, 0.7 + horizSpeed * 7.5) : 0.35;
+            const legSwingAmp = moving ? Math.min(0.62, 0.18 + horizSpeed * 2.2) : 0.04;
+            const swing = Math.sin(time * walkRate) * legSwingAmp;
+            const actionSwing = this.getActionArmSwing();
+            const tPoseBlend = Math.max(0, Math.min(1, (horizSpeed - 0.02) / 0.10));
+            const armSweepAmp = moving ? Math.min(0.45, 0.12 + horizSpeed * 1.8) : 0;
+            const armSweep = Math.sin(time * walkRate) * armSweepAmp;
+
+            // Arms raise to T-pose while moving and drop to sides at idle.
+            parts.rightArmPivot.rotation.z = (Math.PI / 2) * tPoseBlend - (actionSwing * 0.16);
+            parts.leftArmPivot.rotation.z = -(Math.PI / 2) * tPoseBlend;
+            parts.rightArmPivot.rotation.x = actionSwing * 1.05;
+            parts.leftArmPivot.rotation.x = 0;
+            parts.rightArmPivot.rotation.y = (armSweep * tPoseBlend) + (actionSwing * 0.2);
+            parts.leftArmPivot.rotation.y = -(armSweep * tPoseBlend);
+
+            parts.rightLegPivot.rotation.x = swing;
+            parts.leftLegPivot.rotation.x = -swing;
+        }
         
         // Update floating hearts
         if (this.hearts) {
@@ -8307,11 +8867,26 @@ class Game {
             }
 
             this.player.keys[e.key.toLowerCase()] = true;
+
+            if ((e.key === 'Control' || e.code === 'ControlLeft' || e.code === 'ControlRight') && this.hasWoodShieldEquipped()) {
+                this.player.shieldRaised = true;
+            }
             
             // Toggle inventory with E
             if (e.key.toLowerCase() === 'e') {
                 e.preventDefault();
                 this.toggleInventory();
+                return;
+            }
+
+            if (e.key.toLowerCase() === 'r') {
+                e.preventDefault();
+                this.hotbarScrollMode = this.hotbarScrollMode === 'blocks' ? 'gear' : 'blocks';
+                if (this.hotbarScrollMode === 'gear') {
+                    this.applyGearHotbarSelection();
+                }
+                this.updateHotbar();
+                console.log(`Hotbar mode: ${this.hotbarScrollMode}`);
                 return;
             }
 
@@ -8367,7 +8942,7 @@ class Game {
             // Block selection by number keys (map to hotbar slots)
             const num = parseInt(e.key);
             if (!isNaN(num)) {
-                const slots = document.querySelectorAll('.hotbar-slot');
+                const slots = this.getBlockHotbarSlots();
                 if (num >= 1 && num <= slots.length) {
                     const slot = slots[num - 1];
                     const bt = parseInt(slot.dataset.block) || 0;
@@ -8380,6 +8955,9 @@ class Game {
 
         document.addEventListener('keyup', (e) => {
             this.player.keys[e.key.toLowerCase()] = false;
+            if (e.key === 'Control' || e.code === 'ControlLeft' || e.code === 'ControlRight') {
+                this.player.shieldRaised = false;
+            }
         });
 
         // Mouse
@@ -8411,8 +8989,11 @@ class Game {
         // Mouse buttons
         document.addEventListener('mousedown', (e) => {
             if (e.button === 0) {
+                this.leftMouseDown = true;
                 // Don't destroy block if a container UI is open
-                if (this.openChestPos || this.opencandlePos || this.openCauldronPos) return;
+                if (this.openChestPos || this.opencandlePos || this.openCauldronPos || this.openAnvilPos) return;
+
+                this.triggerActionArmSwing();
                 
                 // In survival mode, try to attack piggron first
                 if (this.survivalMode) {
@@ -8426,7 +9007,7 @@ class Game {
                 // Use Cloud Pillow in off-hand to toggle astral dimension during night
                 if (this.hasCloudPillowEquipped()) {
                     // Avoid activating while UI is open
-                    if (this.inventoryOpen || this.openChestPos || this.opencandlePos || this.openCauldronPos) return;
+                    if (this.inventoryOpen || this.openChestPos || this.opencandlePos || this.openCauldronPos || this.openAnvilPos) return;
 
                     if (this.inAstralDimension) {
                         this.exitAstralDimension();
@@ -8437,6 +9018,8 @@ class Game {
                         return;
                     }
                 }
+
+                this.triggerActionArmSwing();
 
                 // Find the slot with the selected item in inventory (works for both hotbar and main inventory selections)
                 let selectedSlot = -1;
@@ -8548,6 +9131,7 @@ class Game {
         // Require holding left mouse to break: cancel on mouseup
         document.addEventListener('mouseup', (e) => {
             if (e.button === 0) {
+                this.leftMouseDown = false;
                 if (this.pendingBreak && this.pendingBreak.timeout) {
                     try { clearTimeout(this.pendingBreak.timeout); } catch (err) {}
                     this.pendingBreak = null;
@@ -8559,13 +9143,31 @@ class Game {
         document.addEventListener('contextmenu', (e) => e.preventDefault());
 
         // Hotbar clicks
-        const hotbarSlots = document.querySelectorAll('.hotbar-slot');
+        const hotbarSlots = this.getAllHotbarSlots();
         hotbarSlots.forEach((slot, idx) => {
             slot.addEventListener('click', () => {
+                const equipSlot = slot.dataset.equipSlot || '';
+                const gearSlot = slot.dataset.gearSlot;
                 const blockType = parseInt(slot.dataset.block) || 0;
+                if (equipSlot) {
+                    if (blockType > 0) {
+                        this.player.selectedBlock = blockType;
+                        this.updateHotbar();
+                    }
+                    return;
+                }
+                if (gearSlot !== undefined && gearSlot !== '') {
+                    this.gearHotbarIndex = Math.max(0, Number(gearSlot) || 0);
+                    this.hotbarScrollMode = 'gear';
+                    this.applyGearHotbarSelection();
+                    this.updateHotbar();
+                    return;
+                }
                 if (blockType > 0) {
+                    const selectableIndex = this.getBlockHotbarSlots().indexOf(slot);
                     this.player.selectedBlock = blockType;
-                    this.hotbarIndex = idx;
+                    if (selectableIndex >= 0) this.hotbarIndex = selectableIndex;
+                    this.hotbarScrollMode = 'blocks';
                     this.updateHotbar();
                 }
             });
@@ -8580,13 +9182,53 @@ class Game {
                 try { srcIdx = Number(e.dataTransfer.getData('text/plain')); } catch (err) { srcIdx = null; }
                 if (isNaN(srcIdx) || srcIdx === null) return;
 
-                // swap inventory[srcIdx] with hotbar slot's item
-                const invVal = this.player.inventory[srcIdx] || 0;
-                const hotVal = parseInt(slot.dataset.block) || 0;
+                const equipSlot = slot.dataset.equipSlot || '';
+                const gearSlot = slot.dataset.gearSlot;
+                const invItem = this.player.inventory[srcIdx] || 0;
+                if (equipSlot) {
+                    if (!invItem) return;
+                    if (!this.canEquipItemInSlot(equipSlot, invItem)) return;
 
-                // perform swap - handle both stacked objects and old numeric format
-                this.player.inventory[srcIdx] = hotVal;
+                    const itemType = this.getItemTypeValue(invItem);
+                    if (!itemType) return;
+
+                    const oldEquip = this.player.equipment[equipSlot] || 0;
+                    this.player.equipment[equipSlot] = { type: itemType, amount: 1, maxStack: 1 };
+
+                    if (typeof invItem === 'object') {
+                        invItem.amount = Math.max(0, (invItem.amount || 1) - 1);
+                        if (invItem.amount <= 0) this.player.inventory[srcIdx] = 0;
+                    } else {
+                        this.player.inventory[srcIdx] = 0;
+                    }
+
+                    if (oldEquip && this.getItemTypeValue(oldEquip)) {
+                        this.addToInventory(this.getItemTypeValue(oldEquip), 1);
+                    }
+
+                    this.applyContainerAccessoryBonuses();
+                    this.updateInventoryUI();
+                    this.updateHotbar();
+                    return;
+                }
+
+                if (gearSlot !== undefined && gearSlot !== '') {
+                    const blockTypeToStore = typeof invItem === 'object' ? invItem.type : invItem;
+                    if (!blockTypeToStore) return;
+                    slot.dataset.block = String(blockTypeToStore);
+                    this.gearHotbarIndex = Math.max(0, Number(gearSlot) || 0);
+                    this.hotbarScrollMode = 'gear';
+                    this.applyGearHotbarSelection();
+                    this.updateInventoryUI();
+                    this.updateHotbar();
+                    return;
+                }
+
+                // Hotbar stores quick-select types only. Do not swap/move stack objects
+                // into hotbar, otherwise stack counts are lost.
+                const invVal = invItem;
                 const blockTypeToStore = typeof invVal === 'object' ? invVal.type : invVal;
+                if (!blockTypeToStore) return;
                 slot.dataset.block = blockTypeToStore;
 
                 // update hotbar display - set text directly on slot
@@ -8597,8 +9239,10 @@ class Game {
                 this.updateHotbar(); // Refresh hotbar to ensure proper display
                 
                 if (blockTypeToStore > 0) {
+                    const selectableIndex = this.getBlockHotbarSlots().indexOf(slot);
                     this.player.selectedBlock = blockTypeToStore;
-                    this.hotbarIndex = idx;
+                    if (selectableIndex >= 0) this.hotbarIndex = selectableIndex;
+                    this.hotbarScrollMode = 'blocks';
                 }
             });
         });
@@ -8606,17 +9250,23 @@ class Game {
         // Mouse wheel to select hotbar
         document.addEventListener('wheel', (e) => {
             if (this.inventoryOpen) return; // don't change while inventory open
-            const slots = document.querySelectorAll('.hotbar-slot');
+            const slots = this.getScrollControlledHotbarSlots();
             if (!slots || slots.length === 0) return;
             e.preventDefault();
             if (e.deltaY > 0) {
-                this.hotbarIndex = (this.hotbarIndex + 1) % slots.length;
+                if (this.hotbarScrollMode === 'gear') this.gearHotbarIndex = (this.gearHotbarIndex + 1) % slots.length;
+                else this.hotbarIndex = (this.hotbarIndex + 1) % slots.length;
             } else if (e.deltaY < 0) {
-                this.hotbarIndex = (this.hotbarIndex - 1 + slots.length) % slots.length;
+                if (this.hotbarScrollMode === 'gear') this.gearHotbarIndex = (this.gearHotbarIndex - 1 + slots.length) % slots.length;
+                else this.hotbarIndex = (this.hotbarIndex - 1 + slots.length) % slots.length;
             }
-            const slot = slots[this.hotbarIndex];
-            const bt = parseInt(slot.dataset.block) || 0;
-            this.player.selectedBlock = bt;
+            if (this.hotbarScrollMode === 'gear') {
+                this.applyGearHotbarSelection();
+            } else {
+                const slot = slots[this.hotbarIndex];
+                const bt = parseInt(slot.dataset.block) || 0;
+                this.player.selectedBlock = bt;
+            }
             this.updateHotbar();
         }, { passive: false });
 
@@ -8663,7 +9313,7 @@ class Game {
         
         // Check if any menu is open (only treat creative menu as open when visible)
         const creativeOpen = this._creativeMenuEl && this._creativeMenuEl.style && this._creativeMenuEl.style.display === 'block';
-        const menuOpen = !!(this.inventoryOpen || this.openChestPos || this.opencandlePos || this.openCauldronPos || creativeOpen);
+        const menuOpen = !!(this.inventoryOpen || this.openChestPos || this.opencandlePos || this.openCauldronPos || this.openAnvilPos || creativeOpen);
         
         if (menuOpen) {
             // Left stick for inventory navigation with rate limiting
@@ -8839,7 +9489,7 @@ class Game {
         
         // RT (Right Trigger, index 7) = Destroy block
         if (gamepad.buttons[7] && gamepad.buttons[7].pressed && !this.gamepadState.buttonsPressed[7]) {
-            if (!this.openChestPos && !this.opencandlePos && !this.openCauldronPos) {
+            if (!this.openChestPos && !this.opencandlePos && !this.openCauldronPos && !this.openAnvilPos) {
                 if (this.survivalMode) {
                     const attacked = this.attackpiggron();
                     if (!attacked) this.destroyBlock();
@@ -8862,12 +9512,17 @@ class Game {
         
         // LB (index 4) = Cycle hotbar left
         if (gamepad.buttons[4] && gamepad.buttons[4].pressed && !this.gamepadState.buttonsPressed[4]) {
-            const slots = document.querySelectorAll('.hotbar-slot');
+            const slots = this.getScrollControlledHotbarSlots();
             if (slots.length > 0) {
-                this.hotbarIndex = (this.hotbarIndex - 1 + slots.length) % slots.length;
-                const slot = slots[this.hotbarIndex];
-                const bt = parseInt(slot.dataset.block) || 0;
-                this.player.selectedBlock = bt;
+                if (this.hotbarScrollMode === 'gear') {
+                    this.gearHotbarIndex = (this.gearHotbarIndex - 1 + slots.length) % slots.length;
+                    this.applyGearHotbarSelection();
+                } else {
+                    this.hotbarIndex = (this.hotbarIndex - 1 + slots.length) % slots.length;
+                    const slot = slots[this.hotbarIndex];
+                    const bt = parseInt(slot.dataset.block) || 0;
+                    this.player.selectedBlock = bt;
+                }
                 this.updateHotbar();
             }
             this.gamepadState.buttonsPressed[4] = true;
@@ -8877,12 +9532,17 @@ class Game {
         
         // RB (index 5) = Cycle hotbar right
         if (gamepad.buttons[5] && gamepad.buttons[5].pressed && !this.gamepadState.buttonsPressed[5]) {
-            const slots = document.querySelectorAll('.hotbar-slot');
+            const slots = this.getScrollControlledHotbarSlots();
             if (slots.length > 0) {
-                this.hotbarIndex = (this.hotbarIndex + 1) % slots.length;
-                const slot = slots[this.hotbarIndex];
-                const bt = parseInt(slot.dataset.block) || 0;
-                this.player.selectedBlock = bt;
+                if (this.hotbarScrollMode === 'gear') {
+                    this.gearHotbarIndex = (this.gearHotbarIndex + 1) % slots.length;
+                    this.applyGearHotbarSelection();
+                } else {
+                    this.hotbarIndex = (this.hotbarIndex + 1) % slots.length;
+                    const slot = slots[this.hotbarIndex];
+                    const bt = parseInt(slot.dataset.block) || 0;
+                    this.player.selectedBlock = bt;
+                }
                 this.updateHotbar();
             }
             this.gamepadState.buttonsPressed[5] = true;
@@ -8899,9 +9559,62 @@ class Game {
         }
     }
 
+    getAllHotbarSlots() {
+        return Array.from(document.querySelectorAll('.hotbar-slot'));
+    }
+
+    getBlockHotbarSlots() {
+        return this.getAllHotbarSlots().filter(slot => !slot.dataset.equipSlot && slot.dataset.gearSlot === undefined);
+    }
+
+    getSelectableHotbarSlots() {
+        return this.getBlockHotbarSlots();
+    }
+
+    getGearHotbarSlots() {
+        return this.getAllHotbarSlots().filter(slot => slot.dataset.gearSlot !== undefined);
+    }
+
+    getScrollControlledHotbarSlots() {
+        return this.hotbarScrollMode === 'gear' ? this.getGearHotbarSlots() : this.getBlockHotbarSlots();
+    }
+
+    applyGearHotbarSelection() {
+        const slots = this.getGearHotbarSlots();
+        if (!slots.length) return;
+        this.gearHotbarIndex = Math.max(0, Math.min(this.gearHotbarIndex, slots.length - 1));
+        const slot = slots[this.gearHotbarIndex];
+        const type = parseInt(slot.dataset.block) || 0;
+        if (!type) return;
+        this.player.selectedBlock = type;
+        this.player.equipment.mainHand = { type, amount: 1, maxStack: 1 };
+    }
+
+    syncHandHotbarSlots() {
+        if (!this.player || !this.player.equipment) return;
+        const allSlots = this.getAllHotbarSlots();
+        for (const slot of allSlots) {
+            const equipSlot = slot.dataset.equipSlot || '';
+            if (!equipSlot) continue;
+            const type = this.getItemTypeValue(this.player.equipment[equipSlot]);
+            const label = equipSlot === 'offHand' ? 'L' : 'R';
+            slot.dataset.block = String(type || 0);
+            slot.textContent = type ? `${label}:${this.blockNames[type] || type}` : label;
+        }
+
+        const gearSlots = this.getGearHotbarSlots();
+        gearSlots.forEach((slot, i) => {
+            const type = parseInt(slot.dataset.block) || 0;
+            slot.textContent = type ? `M${i + 1}:${this.blockNames[type] || type}` : `M${i + 1}`;
+        });
+    }
+
     updateHotbar() {
-        const slots = document.querySelectorAll('.hotbar-slot');
-        if (!slots || slots.length === 0) return;
+        const slots = this.getBlockHotbarSlots();
+        if (!slots || slots.length === 0) {
+            this.syncHandHotbarSlots();
+            return;
+        }
 
         // Try to align hotbarIndex with selectedBlock if possible
         let foundIndex = -1;
@@ -8914,11 +9627,19 @@ class Game {
         slots.forEach((slot, i) => {
             if (i === this.hotbarIndex) slot.classList.add('selected'); else slot.classList.remove('selected');
         });
+
+        const gearSlots = this.getGearHotbarSlots();
+        gearSlots.forEach((slot, i) => {
+            if (this.hotbarScrollMode === 'gear' && i === this.gearHotbarIndex) slot.classList.add('mode-selected');
+            else slot.classList.remove('mode-selected');
+        });
+        this.syncHandHotbarSlots();
     }
 
     initializeHotbar() {
-        const slots = document.querySelectorAll('.hotbar-slot');
+        const slots = this.getBlockHotbarSlots();
         if (!slots || slots.length === 0) return;
+        const gearSlots = this.getGearHotbarSlots();
 
         if (this.survivalMode) {
             // In survival mode: start with empty hotbar
@@ -8926,12 +9647,16 @@ class Game {
                 slot.dataset.block = '0';
                 slot.textContent = '';
             });
+            gearSlots.forEach((slot) => {
+                slot.dataset.block = '0';
+            });
             // Select first slot but with no block
             this.hotbarIndex = 0;
+            this.gearHotbarIndex = 0;
             this.player.selectedBlock = 0;
         } else {
-            // In creative mode: populate hotbar with common blocks (include musket as last slot)
-            const blockTypes = [1, 2, 3, 4, 5, 6, 7, 8, 12, this.MUSKET_TYPE];
+            // In creative mode: populate hotbar with common blocks + ranged weapons/ammo
+            const blockTypes = [1, 2, 3, 4, 5, 6, 7, this.BOW_TYPE, this.MUSKET_TYPE, this.EXPLOSIVE_ARROW_TYPE];
             slots.forEach((slot, i) => {
                 if (i < blockTypes.length) {
                     const blockType = blockTypes[i];
@@ -8942,8 +9667,13 @@ class Game {
                     slot.textContent = '';
                 }
             });
+            const gearTypes = [22, 30, this.BOW_TYPE, this.MUSKET_TYPE];
+            gearSlots.forEach((slot, i) => {
+                slot.dataset.block = String(gearTypes[i] || 0);
+            });
             // Select first slot with Dirt
             this.hotbarIndex = 0;
+            this.gearHotbarIndex = 0;
             this.player.selectedBlock = 1;
         }
         
@@ -8996,7 +9726,7 @@ class Game {
 
     destroyBlock() {
         // Ignore if a container UI is open
-        if (this.openChestPos || this.opencandlePos || this.openCauldronPos) return;
+        if (this.openChestPos || this.opencandlePos || this.openCauldronPos || this.openAnvilPos) return;
 
         const hit = this.raycastBlock();
         if (!hit) {
@@ -9225,6 +9955,13 @@ class Game {
         if (this.primedTNT.has(key)) return;
         if (this.world.getBlock(x, y, z) !== this.TNT_TYPE) return;
 
+        // Play sizzle/fuse sound
+        try {
+            const sizzle = this.sizzleSound ? this.sizzleSound.cloneNode() : new Audio('match-sizzle.mp3');
+            sizzle.volume = this.sizzleSound ? this.sizzleSound.volume : 0.7;
+            sizzle.play().catch(() => {});
+        } catch (e) {}
+
         const flashMesh = new THREE.Mesh(
             new THREE.BoxGeometry(1.03, 1.03, 1.03),
             new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 })
@@ -9267,19 +10004,21 @@ class Game {
         }
     }
 
-    explodeTNT(x, y, z) {
-        const radius = 3;
+    explodeTNT(x, y, z, radius = 3, chainTNT = true) {
         const radiusSq = radius * radius;
         const changedChunks = new Set();
 
         // Play explosion audio, allowing overlaps from chain reactions.
         try {
-            const boom = this.explosionSound ? this.explosionSound.cloneNode() : new Audio('Explotion.ogg');
+            const boom = this.explosionSound ? this.explosionSound.cloneNode() : new Audio('explosion.mp3');
             boom.volume = this.explosionSound ? this.explosionSound.volume : 0.85;
             boom.play().catch(e => console.log('Explosion sound failed:', e));
         } catch (e) {
             console.log('Explosion sound creation failed:', e);
         }
+
+        // Collect all network messages to batch-send after the loop
+        const netMessages = [];
 
         for (let dx = -radius; dx <= radius; dx++) {
             for (let dy = -radius; dy <= radius; dy++) {
@@ -9294,32 +10033,41 @@ class Game {
                     if (blockType === 0) continue;
 
                     // Chain nearby TNT quickly instead of deleting it immediately.
-                    if (blockType === this.TNT_TYPE && !(wx === x && wy === y && wz === z)) {
+                    if (chainTNT && blockType === this.TNT_TYPE && !(wx === x && wy === y && wz === z)) {
                         this.primeTNT(wx, wy, wz, 1200);
                         continue;
                     }
 
-                    this.world.setBlock(wx, wy, wz, 0);
-
-                    if (this.ws && this.ws.readyState === 1) {
-                        try {
-                            this.ws.send(JSON.stringify({
-                                type: 'blockChange',
-                                x: wx,
-                                y: wy,
-                                z: wz,
-                                blockType: 0
-                            }));
-                        } catch {}
+                    // Write directly into chunk data to skip per-block lighting recompute.
+                    // We do ONE lighting pass per chunk at the end instead.
+                    if (wy >= 0 && wy < this.world.chunkHeight) {
+                        const cx = Math.floor(wx / this.world.chunkSize);
+                        const cz = Math.floor(wz / this.world.chunkSize);
+                        const lx = ((wx % this.world.chunkSize) + this.world.chunkSize) % this.world.chunkSize;
+                        const lz = ((wz % this.world.chunkSize) + this.world.chunkSize) % this.world.chunkSize;
+                        const chunk = this.world.chunks.get(this.world.getChunkKey(cx, cz));
+                        if (chunk) {
+                            chunk.blocks[this.world.getBlockIndex(lx, wy, lz)] = 0;
+                            chunk.modified = true;
+                            chunk.playerModified = true;
+                            changedChunks.add(`${cx},${cz}`);
+                        }
                     }
 
-                    const cx = Math.floor(wx / this.world.chunkSize);
-                    const cz = Math.floor(wz / this.world.chunkSize);
-                    changedChunks.add(`${cx},${cz}`);
+                    netMessages.push({ x: wx, y: wy, z: wz });
                 }
             }
         }
 
+        // One lighting recompute per affected chunk (not per block)
+        for (const chunkKey of changedChunks) {
+            const [cxStr, czStr] = chunkKey.split(',');
+            const cx = parseInt(cxStr, 10);
+            const cz = parseInt(czStr, 10);
+            this.world.computeLightingForChunk(cx, cz);
+        }
+
+        // Queue mesh updates for affected chunks + their neighbors
         for (const chunkKey of changedChunks) {
             const [cxStr, czStr] = chunkKey.split(',');
             const cx = parseInt(cxStr, 10);
@@ -9328,6 +10076,15 @@ class Game {
                 for (let oz = -1; oz <= 1; oz++) {
                     this.queueChunkMeshUpdate(cx + ox, cz + oz);
                 }
+            }
+        }
+
+        // Send network messages in one batch
+        if (this.ws && this.ws.readyState === 1) {
+            for (const msg of netMessages) {
+                try {
+                    this.ws.send(JSON.stringify({ type: 'blockChange', x: msg.x, y: msg.y, z: msg.z, blockType: 0 }));
+                } catch {}
             }
         }
 
@@ -9351,6 +10108,19 @@ class Game {
 
     attackpiggron() {
         if ((!this.pigmen || this.pigmen.length === 0) && (!this.slimes || this.slimes.length === 0) && (!this.minutors || this.minutors.length === 0) && (!this.sacculariusMoles || this.sacculariusMoles.length === 0) && (!this.piggronPriest || this.piggronPriest.isDead)) return false;
+
+        // Play sword whoosh for melee swings when using any sword.
+        const mainHand = this.player && this.player.equipment ? this.player.equipment.mainHand : 0;
+        const mainHandType = this.getItemTypeValue(mainHand);
+        if (this.isSwordType(mainHandType) || this.isSwordType(this.player.selectedBlock)) {
+            if (this.swordWiffSound) {
+                try {
+                    const snd = this.swordWiffSound.cloneNode();
+                    snd.currentTime = 0;
+                    snd.play().catch(() => {});
+                } catch (e) {}
+            }
+        }
 
         const camera = this.player.getCamera();
         const direction = new THREE.Vector3(0, 0, -1);
@@ -9536,6 +10306,57 @@ class Game {
 
     // Fire the musket weapon if held; we don't perform block placement in
     // that case.
+    getInventoryCount(itemType) {
+        let total = 0;
+        if (!this.player || !this.player.inventory) return total;
+        for (const item of this.player.inventory) {
+            if (!item) continue;
+            const type = (typeof item === 'object') ? item.type : item;
+            if (type !== itemType) continue;
+            total += (typeof item === 'object') ? Math.max(0, item.amount || 0) : 1;
+        }
+        return total;
+    }
+
+    consumeInventoryItem(itemType, amount = 1) {
+        if (!this.player || !this.player.inventory || amount <= 0) return false;
+        let remaining = amount;
+        for (let i = 0; i < this.player.inventory.length && remaining > 0; i++) {
+            const item = this.player.inventory[i];
+            if (!item) continue;
+            const type = (typeof item === 'object') ? item.type : item;
+            if (type !== itemType) continue;
+
+            if (typeof item === 'object') {
+                const take = Math.min(remaining, Math.max(0, item.amount || 0));
+                item.amount -= take;
+                remaining -= take;
+                if (item.amount <= 0) this.player.inventory[i] = 0;
+            } else {
+                this.player.inventory[i] = 0;
+                remaining -= 1;
+            }
+        }
+        if (remaining <= 0) {
+            this.updateInventoryUI();
+            this.updateHotbar();
+            return true;
+        }
+        return false;
+    }
+
+    selectBowAmmoType() {
+        if (!this.player) return null;
+        const wantsExplosive = !!(this.player.keys && this.player.keys['shift']);
+        const normalCount = this.getInventoryCount(this.ARROW_TYPE);
+        const explosiveCount = this.getInventoryCount(this.EXPLOSIVE_ARROW_TYPE);
+
+        if (wantsExplosive && explosiveCount > 0) return this.EXPLOSIVE_ARROW_TYPE;
+        if (normalCount > 0) return this.ARROW_TYPE;
+        if (explosiveCount > 0) return this.EXPLOSIVE_ARROW_TYPE;
+        return null;
+    }
+
     shootMusket() {
         if (!this.player) return;
         // play firing sound (clone node so multiple shots can overlap)
@@ -9554,11 +10375,91 @@ class Game {
         const startPos = camera.position.clone().add(dir.clone().multiplyScalar(1));
         const speed = 1.2;
         const damage = 15;
-        const proj = new Projectile(startPos, dir, speed, damage, this.player);
+        const proj = new Projectile(startPos, dir, speed, damage, this.player, 'bullet', 'musket');
         // add mesh to our scene so it is rendered
         if (proj.mesh && this.scene) {
             this.scene.add(proj.mesh);
         }
+        this.projectiles.push(proj);
+    }
+
+    shootBow() {
+        if (!this.player) return;
+
+        let ammoType = this.ARROW_TYPE;
+        if (this.survivalMode) {
+            ammoType = this.selectBowAmmoType();
+            if (!ammoType) {
+                console.log('Out of arrows. Carry Arrow or Explosive Arrow ammo.');
+                return;
+            }
+        }
+
+        // Prefer bow-shot, but fall back to musket sound if bow-shot is missing/blocked.
+        const playMusketFallback = () => {
+            if (!this.musketSound) return;
+            try {
+                const snd2 = this.musketSound.cloneNode();
+                snd2.currentTime = 0;
+                snd2.volume = 0.45;
+                snd2.play().catch(() => {});
+            } catch (e) {}
+        };
+
+        if (this.bowSound && !this.bowSoundMissing) {
+            try {
+                const snd = this.bowSound.cloneNode();
+                snd.currentTime = 0;
+                snd.play().catch(() => playMusketFallback());
+            } catch (e) {
+                playMusketFallback();
+            }
+        } else {
+            playMusketFallback();
+        }
+
+        const camera = this.player.getCamera();
+        const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+        const startPos = camera.position.clone().add(dir.clone().multiplyScalar(1));
+
+        const explosive = ammoType === this.EXPLOSIVE_ARROW_TYPE;
+        const speed = explosive ? 1.05 : 1.15;
+        const damage = explosive ? 10 : 12;
+        const kind = explosive ? 'explosive_arrow' : 'arrow';
+        const hitCause = explosive ? 'explosive_arrow' : 'arrow';
+        const proj = new Projectile(startPos, dir, speed, damage, this.player, kind, hitCause);
+        if (proj.mesh && this.scene) this.scene.add(proj.mesh);
+        this.projectiles.push(proj);
+
+        if (this.survivalMode) {
+            this.consumeInventoryItem(ammoType, 1);
+        }
+    }
+
+    shootRubyBeam() {
+        if (!this.player) return;
+
+        const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (now - this.lastRubyBeamTime < this.rubyBeamCooldownMs) {
+            return;
+        }
+        this.lastRubyBeamTime = now;
+
+        if (this.beamSound) {
+            try {
+                const snd = this.beamSound.cloneNode();
+                snd.currentTime = 0;
+                snd.play().catch(() => {});
+            } catch (e) {}
+        }
+
+        const camera = this.player.getCamera();
+        const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+        const startPos = camera.position.clone().add(dir.clone().multiplyScalar(1));
+        const speed = 1.5;
+        const damage = 7;
+        const proj = new Projectile(startPos, dir, speed, damage, this.player, 'ruby_beam', 'ruby_beam');
+        if (proj.mesh && this.scene) this.scene.add(proj.mesh);
         this.projectiles.push(proj);
     }
 
@@ -9882,9 +10783,65 @@ class Game {
     }
 
     placeBlock() {
+        // wood shield is equipment, never a placeable block.
+        // Right-click with shield selected equips it to off-hand.
+        if (this.player.selectedBlock === 23) {
+            if (this.survivalMode) {
+                let foundSlot = -1;
+                for (let i = 0; i < this.player.inventory.length; i++) {
+                    const item = this.player.inventory[i];
+                    if (!item) continue;
+                    const type = (typeof item === 'object') ? item.type : item;
+                    if (type === 23) {
+                        foundSlot = i;
+                        break;
+                    }
+                }
+                if (foundSlot === -1) {
+                    console.log('No Wood Shield in inventory to equip.');
+                    return;
+                }
+
+                const oldOffHand = this.player.equipment.offHand || 0;
+                this.player.equipment.offHand = { type: 23, amount: 1, maxStack: 1 };
+
+                const src = this.player.inventory[foundSlot];
+                if (typeof src === 'object') {
+                    src.amount = Math.max(0, (src.amount || 1) - 1);
+                    if (src.amount <= 0) this.player.inventory[foundSlot] = 0;
+                } else {
+                    this.player.inventory[foundSlot] = 0;
+                }
+
+                const oldType = this.getItemTypeValue(oldOffHand);
+                if (oldType && oldType !== 23) this.addToInventory(oldType, 1);
+
+                this.updateInventoryUI();
+                this.updateHotbar();
+                console.log('Wood Shield equipped to off-hand.');
+            } else {
+                this.player.equipment.offHand = { type: 23, amount: 1, maxStack: 1 };
+                this.updateHotbar();
+                console.log('Wood Shield equipped to off-hand.');
+            }
+            return;
+        }
+
+        // bow override
+        if (this.player.selectedBlock === this.BOW_TYPE) {
+            this.shootBow();
+            return;
+        }
+
         // musket override
         if (this.player.selectedBlock === this.MUSKET_TYPE) {
             this.shootMusket();
+            return;
+        }
+
+        // ruby sword beam override
+        if (this.player.selectedBlock === this.RUBY_SWORD_TYPE) {
+            this.shootRubyBeam();
             return;
         }
 
@@ -9934,6 +10891,12 @@ class Game {
             // Open cauldron UI if clicking on cauldron
             if (hit.blockType === this.CAULDRON_TYPE) {
                 this.opencauldron(hit.x, hit.y, hit.z);
+                return;
+            }
+
+            // Reforge swords at an anvil for 250 gold.
+            if (hit.blockType === this.ANVIL_TYPE) {
+                this.openAnvilUI(hit.x, hit.y, hit.z);
                 return;
             }
 
@@ -10827,6 +11790,9 @@ class Game {
                 { inputs: { 1: 1 }, result: 10, resultAmount: 1, name: '1 Dirt → 1 Snow (Test)' },
                 // musket recipe: 2 planks + 5 coal + 3 stone
                 { inputs: { 13: 2, 24: 5, 3: 3 }, result: this.MUSKET_TYPE, resultAmount: 1, name: '2 Planks + 5 Coal + 3 Stone → Musket' },
+                { inputs: { 13: 2, 15: 2 }, result: this.BOW_TYPE, resultAmount: 1, name: '2 Planks + 2 Sticks → Bow' },
+                { inputs: { 13: 1, 15: 1 }, result: this.ARROW_TYPE, resultAmount: 6, name: '1 Plank + 1 Stick → 6 Arrows' },
+                { inputs: { [this.ARROW_TYPE]: 2, 24: 1 }, result: this.EXPLOSIVE_ARROW_TYPE, resultAmount: 1, name: '2 Arrows + 1 Coal → 1 Explosive Arrow' },
                 { inputs: { 14: 2, 24: 1 }, result: this.MAP_TYPE, resultAmount: 1, name: '2 Paper + 1 Coal → Map' },
                 { inputs: { 3: 3, 24: 2 }, result: this.CAULDRON_TYPE, resultAmount: 1, name: '3 Stone + 2 Coal → Cauldron' },
                 { inputs: { 13: 4 }, result: this.WOOD_DOOR_TYPE, resultAmount: 1, name: '4 Planks → Wood Door' },
@@ -11814,10 +12780,10 @@ class Game {
         this.updateInventoryUI();
 
         // Ensure hotbar reflects the chosen item for immediate use
-        const slots = document.querySelectorAll('.hotbar-slot');
-        if (slots && slots.length) {
+        const selectable = this.getBlockHotbarSlots();
+        if (selectable && selectable.length) {
             const idx = this.hotbarIndex || 0;
-            const slot = slots[idx];
+            const slot = selectable[idx];
             slot.dataset.block = blockType;
             slot.textContent = this.blockNames[blockType] || '';
             this.hotbarIndex = idx;
@@ -11906,6 +12872,7 @@ class Game {
                 if (this.openChestPos) this.closeChestUI();
                 if (this.opencandlePos) this.closecandleUI();
                 if (this.openCauldronPos) this.closecauldronUI();
+                if (this.openAnvilPos) this.closeAnvilUI();
                 try {
                     const el = this.renderer && this.renderer.domElement;
                     if (el && document.body.contains(el) && typeof el.requestPointerLock === 'function') el.requestPointerLock();
@@ -13949,13 +14916,33 @@ ${ops.join(',\n')}
     }
 
     isSwordType(type) {
-        return type === 22 || type === 32; // Stone Sword or Golden Sword
+        return type === 22 || type === 32 || type === this.RUBY_SWORD_TYPE; // Stone, Golden, Ruby
+    }
+
+    isWeaponVisualType(type) {
+        if (!type) return false;
+        return this.isSwordType(type) || type === 23 || type === this.MUSKET_TYPE || type === this.BOW_TYPE;
+    }
+
+    triggerActionArmSwing() {
+        const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+        this.actionSwingUntil = now + this.actionSwingDuration;
+    }
+
+    getActionArmSwing() {
+        const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+        const remaining = Math.max(0, this.actionSwingUntil - now);
+        if (remaining <= 0 || this.actionSwingDuration <= 0) return 0;
+        const t = 1 - (remaining / this.actionSwingDuration);
+        return Math.sin(t * Math.PI);
     }
 
     getItemNameWithBonus(item) {
         if (!item) return '';
         const type = this.getItemTypeValue(item);
-        const base = this.blockNames[type] || 'Item';
+        const baseName = this.blockNames[type] || 'Item';
+        const reforgePrefix = (item && typeof item === 'object' && item.reforgeName) ? `${item.reforgeName} ` : '';
+        const base = reforgePrefix + baseName;
         let bonus = '';
         if (item && typeof item === 'object') {
             if (item.armorBonus) bonus += ` +${item.armorBonus}% Armor`;
@@ -13963,9 +14950,177 @@ ${ops.join(',\n')}
             if (item.jumpBonus) bonus += ` +${item.jumpBonus}% Jump`;
             if (item.doubleJump) bonus += ` [Double Jump]`;
             if (item.hasCurse && item.curseType === 'gloom') bonus += ` [Gloom Curse]`;
+            if (item.reforgeName) {
+                if (item.reforgeName === 'Masterfull') bonus += ` [Reforge: +7% Damage]`;
+                if (item.reforgeName === 'Nimble') bonus += ` [Reforge: +4% Armor Piercing]`;
+                if (item.reforgeName === 'Sleek') bonus += ` [Reforge: +2% I-Frame Skip]`;
+            }
         }
         const amt = (item && typeof item === 'object' && item.amount > 1) ? ` x${item.amount}` : '';
         return base + bonus + amt;
+    }
+
+    applyRandomWeaponReforge(item) {
+        if (!item || typeof item !== 'object') return;
+        const roll = Math.floor(Math.random() * 3);
+        if (roll === 0) item.reforgeName = 'Masterfull';
+        else if (roll === 1) item.reforgeName = 'Nimble';
+        else item.reforgeName = 'Sleek';
+    }
+
+    useAnvilReforge() {
+        const REFORGE_COST = 250;
+        if (!this.player) return;
+
+        // Reforging requires gold, so this is survival-only economy behavior.
+        if (!this.survivalMode) {
+            console.log('Anvil reforging is only available in survival mode.');
+            return;
+        }
+
+        const mainHand = this.player.equipment ? this.player.equipment.mainHand : 0;
+        const mainType = this.getItemTypeValue(mainHand);
+        if (!this.isSwordType(mainType)) {
+            console.log('Equip a Stone Sword or Golden Sword in Main Hand to reforge at the anvil.');
+            return;
+        }
+
+        const currentGold = Math.max(0, Math.trunc(Number(this.player.gold) || 0));
+        if (currentGold < REFORGE_COST) {
+            console.log(`You need ${REFORGE_COST} gold to reforge.`);
+            return;
+        }
+
+        let swordItem = mainHand;
+        if (!swordItem || typeof swordItem !== 'object') {
+            swordItem = new Item(mainType, 1);
+            swordItem.maxStack = 1;
+        } else {
+            swordItem.maxStack = 1;
+        }
+
+        this.applyRandomWeaponReforge(swordItem);
+        this.player.equipment.mainHand = swordItem;
+        this.changePlayerGold(-REFORGE_COST, 'anvil-reforge');
+
+        const name = this.getItemNameWithBonus(swordItem);
+        console.log(`Reforged at anvil for ${REFORGE_COST} gold: ${name}`);
+        this.updateInventoryUI();
+        this.updateHotbar();
+    }
+
+    openAnvilUI(x, y, z) {
+        const key = `${x},${y},${z}`;
+        this.openAnvilPos = key;
+        try { document.exitPointerLock(); } catch (e) {}
+
+        const existing = document.getElementById('anvil-ui');
+        if (existing) existing.remove();
+
+        const REFORGE_COST = 250;
+        const mainHand = this.player.equipment ? this.player.equipment.mainHand : 0;
+        const mainType = this.getItemTypeValue(mainHand);
+        const currentGold = Math.max(0, Math.trunc(Number(this.player.gold) || 0));
+
+        const ui = document.createElement('div');
+        ui.id = 'anvil-ui';
+        ui.style.cssText = `
+            position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+            background:#101524;color:#fff;padding:24px 28px;
+            border:2px solid #d4af37;border-radius:10px;
+            z-index:9999;font-family:Arial,sans-serif;min-width:360px;
+            box-shadow:0 0 30px #d4af3755;
+        `;
+
+        let statusHTML = '';
+        let buttonHTML = '';
+
+        if (!this.survivalMode) {
+            statusHTML = '<p style="color:#ff6b6b;font-size:13px;">Anvil reforging only works in Survival mode</p>';
+            buttonHTML = '<button onclick="return false;" disabled style="width:100%;padding:10px;background:#666;color:#999;border:none;border-radius:5px;cursor:not-allowed;">Not Available</button>';
+        } else if (!this.isSwordType(mainType)) {
+            statusHTML = '<p style="color:#ff9f43;font-size:13px;">Equip a sword in your Main Hand to reforge</p>';
+            buttonHTML = '<button onclick="return false;" disabled style="width:100%;padding:10px;background:#666;color:#999;border:none;border-radius:5px;cursor:not-allowed;">No Sword</button>';
+        } else if (currentGold < REFORGE_COST) {
+            statusHTML = `<p style="color:#ff6b6b;font-size:13px;">You need ${REFORGE_COST} gold (have ${currentGold})</p>`;
+            buttonHTML = '<button onclick="return false;" disabled style="width:100%;padding:10px;background:#666;color:#999;border:none;border-radius:5px;cursor:not-allowed;">Not Enough Gold</button>';
+        } else {
+            const currentReforge = (mainHand && typeof mainHand === 'object' && mainHand.reforgeName) || 'None';
+            statusHTML = `
+                <div style="margin-bottom:12px;padding:8px;background:#1a2439;border-radius:5px;border-left:3px solid #d4af37;">
+                    <p style="margin:0;font-size:12px;color:#999;">Current Sword</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffd700;">${this.getItemNameWithBonus(mainHand)}</p>
+                    <p style="margin:4px 0 0;font-size:11px;color:#bbb;">Current Reforge: <span style="color:#d4af37;">${currentReforge}</span></p>
+                </div>
+                <p style="margin:12px 0 8px;font-size:12px;color:#999;">One random reforge will be applied (Masterfull, Nimble, or Sleek)</p>
+                <p style="margin:0;font-size:13px;color:#d4af37;">⚔ Cost: ${REFORGE_COST} gold</p>
+            `;
+            buttonHTML = `
+                <button style="width:100%;padding:10px;background:#d4af37;color:#000;border:none;border-radius:5px;font-weight:bold;cursor:pointer;margin-bottom:8px;" onclick="game.performAnvilReforge('${key}'); game.closeAnvilUI();">
+                    Reforge for ${REFORGE_COST} Gold
+                </button>
+                <button style="width:100%;padding:10px;background:#2c3e50;color:#fff;border:1px solid #556080;border-radius:5px;cursor:pointer;" onclick="game.closeAnvilUI();">
+                    Cancel
+                </button>
+            `;
+        }
+
+        ui.innerHTML = `
+            <h2 style="margin:0 0 14px;color:#d4af37;font-size:20px;">⚒ Anvil Reforge</h2>
+            <hr style="border:none;border-top:1px solid #3d4a5c;margin:10px 0;">
+            ${statusHTML}
+            <div style="margin-top:14px;">
+                ${buttonHTML}
+            </div>
+        `;
+
+        document.body.appendChild(ui);
+    }
+
+    closeAnvilUI() {
+        const anvilWindow = document.getElementById('anvil-ui');
+        if (anvilWindow) anvilWindow.remove();
+        this.openAnvilPos = null;
+    }
+
+    performAnvilReforge(anvilKey) {
+        const REFORGE_COST = 250;
+        if (!this.player) return;
+
+        if (!this.survivalMode) {
+            console.log('Anvil reforging is only available in survival mode.');
+            return;
+        }
+
+        const mainHand = this.player.equipment ? this.player.equipment.mainHand : 0;
+        const mainType = this.getItemTypeValue(mainHand);
+        if (!this.isSwordType(mainType)) {
+            console.log('Equip a Stone Sword or Golden Sword in Main Hand to reforge at the anvil.');
+            return;
+        }
+
+        const currentGold = Math.max(0, Math.trunc(Number(this.player.gold) || 0));
+        if (currentGold < REFORGE_COST) {
+            console.log(`You need ${REFORGE_COST} gold to reforge.`);
+            return;
+        }
+
+        let swordItem = mainHand;
+        if (!swordItem || typeof swordItem !== 'object') {
+            swordItem = new Item(mainType, 1);
+            swordItem.maxStack = 1;
+        } else {
+            swordItem.maxStack = 1;
+        }
+
+        this.applyRandomWeaponReforge(swordItem);
+        this.player.equipment.mainHand = swordItem;
+        this.changePlayerGold(-REFORGE_COST, 'anvil-reforge');
+
+        const name = this.getItemNameWithBonus(swordItem);
+        console.log(`Reforged at anvil for ${REFORGE_COST} gold: ${name}`);
+        this.updateInventoryUI();
+        this.updateHotbar();
     }
 
     tryProcesscandle(candleKey) {
@@ -14035,7 +15190,7 @@ ${ops.join(',\n')}
             // Cloutump Scroll: boots grant one extra jump while airborne.
             enchanted.doubleJump = true;
         }
-        
+
         inv[2] = enchanted;
 
         // Refresh UI after processing
@@ -15314,6 +16469,12 @@ ${ops.join(',\n')}
         return type === 31;
     }
 
+    hasWoodShieldEquipped() {
+        const offHand = this.player && this.player.equipment ? this.player.equipment.offHand : 0;
+        const type = (offHand && typeof offHand === 'object') ? offHand.type : offHand;
+        return type === 23;
+    }
+
     isNightTime() {
         const t = this.dayTime;
         return t >= 0.75 || t < 0.25;
@@ -15888,6 +17049,7 @@ ${ops.join(',\n')}
                 this.updateHandBlock();
                 // Update weapon mesh (first-person)
                 this.updateHandItem();
+                this.updateOffhandShieldVisual();
             } else {
                 // Third-person: orbit camera behind player using yaw for bearing and pitch for tilt
                 const headOffset = new THREE.Vector3(0, 1.5, 0);
@@ -15898,9 +17060,9 @@ ${ops.join(',\n')}
 
                 // Direction pointing backward relative to player facing
                 const behindDir = new THREE.Vector3(
-                    Math.sin(this.player.yaw + Math.PI),
+                    Math.sin(this.player.yaw),
                     0,
-                    Math.cos(this.player.yaw + Math.PI)
+                    Math.cos(this.player.yaw)
                 );
 
                 const desiredCamPos = headPos.clone()
@@ -15914,6 +17076,7 @@ ${ops.join(',\n')}
                 if (this.handBlock && this.handBlock.parent) {
                     try { this.handBlock.parent.remove(this.handBlock); } catch (e) {}
                 }
+                this.updateOffhandShieldVisual();
                 if (this.playerModel) this.playerModel.visible = true;
             }
 
@@ -15960,7 +17123,7 @@ ${ops.join(',\n')}
                     }
                     const wt = this.otherPlayer.equipment ? this.otherPlayer.equipment.mainHand : 0;
                     const ttype = (wt && typeof wt === 'object') ? wt.type : wt;
-                    if (ttype === 22 || ttype === 32 || ttype === 23) {
+                    if (this.isWeaponVisualType(ttype)) {
                         this.otherPlayerWeaponMesh = this.createWeaponMesh(ttype);
                         this.otherPlayerWeaponMesh.position.set(0.4, 0.0, 0.1);
                         this.otherPlayerWeaponMesh.rotation.y = -Math.PI/2;
@@ -15984,6 +17147,8 @@ ${ops.join(',\n')}
                             }
                         });
                     }
+
+                    this.syncHandHotbarSlots();
                 }
             }
 
@@ -16280,6 +17445,9 @@ window.addEventListener('load', () => {
     nameInput.id = 'player-name-input';
     nameInput.placeholder = 'Enter your name';
     nameInput.value = localStorage.getItem('playerName') || 'Player';
+    nameInput.addEventListener('input', () => {
+        localStorage.setItem('playerName', (nameInput.value || 'Player').trim() || 'Player');
+    });
     nameInput.style.padding = '4px';
     nameInput.style.marginLeft = '4px';
     nameLabel.appendChild(nameInput);
@@ -16380,6 +17548,9 @@ window.addEventListener('load', () => {
     colorPicker.type = 'color';
     colorPicker.id = 'player-color-picker';
     colorPicker.value = localStorage.getItem('playerColor') || '#4488ff';
+    colorPicker.addEventListener('input', () => {
+        localStorage.setItem('playerColor', colorPicker.value || '#4488ff');
+    });
     colorPicker.style.width = '60px';
     colorPicker.style.height = '30px';
     colorPicker.style.cursor = 'pointer';
@@ -16567,15 +17738,17 @@ window.addEventListener('load', () => {
                     // Start game and connect to this server
                     const playerName = document.getElementById('player-name-input').value || 'Player';
                     const playerEmail = document.getElementById('player-email-input').value || '';
+                    const playerColor = document.getElementById('player-color-picker').value || '#4488ff';
                     const pw = server.password || '';
                     localStorage.setItem('playerName', playerName);
                     localStorage.setItem('playerEmail', playerEmail);
+                    localStorage.setItem('playerColor', playerColor);
                     localStorage.setItem('serverHost', server.host);
                     localStorage.setItem('serverPort', server.port);
                     localStorage.setItem('serverPassword', pw);
                     stopMenuMusic();
                     document.body.removeChild(menu);
-                    const game = new Game('default', false, 'red', playerName);
+                    const game = new Game('default', false, 'red', playerName, true, playerColor, playerEmail);
                     window._game = game;
                     game.forceUnlockAudio();
                     game.connectServer(server.host, server.port, pw);
@@ -16655,14 +17828,16 @@ window.addEventListener('load', () => {
         const pw = document.getElementById('menu-server-password').value || '';
         const playerName = document.getElementById('player-name-input').value || 'Player';
         const playerEmail = document.getElementById('player-email-input').value || '';
+        const playerColor = document.getElementById('player-color-picker').value || '#4488ff';
         localStorage.setItem('playerName', playerName);
         localStorage.setItem('playerEmail', playerEmail);
+        localStorage.setItem('playerColor', playerColor);
         localStorage.setItem('serverHost', host);
         localStorage.setItem('serverPort', port);
         localStorage.setItem('serverPassword', pw);
         stopMenuMusic();
         document.body.removeChild(menu);
-        const game = new Game('default', false, 'red', playerName);
+        const game = new Game('default', false, 'red', playerName, true, playerColor, playerEmail);
         window._game = game;
         game.forceUnlockAudio();
         game.connectServer(host, port, pw);
@@ -17300,11 +18475,15 @@ window.addEventListener('load', () => {
             console.log('Loading saved world:', data);
 
             const playerName = document.getElementById('player-name-input')?.value || 'Player';
+            const playerEmail = document.getElementById('player-email-input')?.value || (localStorage.getItem('playerEmail') || '');
+            const playerColor = document.getElementById('player-color-picker')?.value || (localStorage.getItem('playerColor') || '#4488ff');
             localStorage.setItem('playerName', playerName);
+            localStorage.setItem('playerEmail', playerEmail);
+            localStorage.setItem('playerColor', playerColor);
 
             // Create game with saved world type and survival mode
             const survivalMode = data.survivalMode !== false;
-            const game = new Game(data.worldType || 'default', false, 'red', playerName, survivalMode);
+            const game = new Game(data.worldType || 'default', false, 'red', playerName, survivalMode, playerColor, playerEmail);
             window._game = game;
             game.forceUnlockAudio();
 
