@@ -8318,7 +8318,6 @@ class Game {
         }
         // Third-person camera state
         this.thirdPerson = false;
-        this.thirdPersonFront = false;
         this.thirdPersonDistance = 4.0;
         this.thirdCamera = new THREE.PerspectiveCamera(fov, window.innerWidth / window.innerHeight, 0.1, 1000);
 
@@ -12123,21 +12122,11 @@ class Game {
                 return;
             }
 
-            // Cycle camera view (F5 or B): first-person -> third-person back -> third-person front -> first-person
+            // Toggle third/first person (F5 or B)
             if (e.key === 'F5' || e.key.toLowerCase() === 'b') {
                 e.preventDefault();
-                if (!this.thirdPerson) {
-                    this.thirdPerson = true;
-                    this.thirdPersonFront = false;
-                    console.log('Camera view: third-person (back)');
-                } else if (!this.thirdPersonFront) {
-                    this.thirdPersonFront = true;
-                    console.log('Camera view: third-person (front)');
-                } else {
-                    this.thirdPerson = false;
-                    this.thirdPersonFront = false;
-                    console.log('Camera view: first-person');
-                }
+                this.thirdPerson = !this.thirdPerson;
+                console.log('Third-person:', this.thirdPerson);
                 // when switching modes, ensure visibility updates immediately
                 if (this.thirdPerson && this.handBlock && this.handBlock.parent) {
                     try { this.handBlock.parent.remove(this.handBlock); } catch (err) {}
@@ -21635,16 +21624,15 @@ ${ops.join(',\n')}
                 const horizontalRadius = this.thirdPersonDistance * Math.cos(this.player.pitch);
                 const verticalOffset = this.thirdPersonDistance * Math.sin(this.player.pitch);
 
-                // Use the usual chase camera offset, then flip it for front-view mode.
-                const cameraDir = new THREE.Vector3(
+                // Direction pointing backward relative to player facing
+                const behindDir = new THREE.Vector3(
                     Math.sin(this.player.yaw),
                     0,
                     Math.cos(this.player.yaw)
                 );
-                const dirScale = this.thirdPersonFront ? -1 : 1;
 
                 const desiredCamPos = headPos.clone()
-                    .addScaledVector(cameraDir, horizontalRadius * dirScale)
+                    .addScaledVector(behindDir, horizontalRadius)
                     .add(new THREE.Vector3(0, verticalOffset, 0));
 
                 this.thirdCamera.position.copy(desiredCamPos);

@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <hta:application
+        id="Agmora"
+        applicationname="Agmora"
+        border="thin"
+        borderstyle="normal"
+        caption="yes"
+        maximizebutton="yes"
+        minimizebutton="yes"
+        showintaskbar="yes"
+        singleinstance="yes"
+        sysmenu="yes"
+        windowstate="maximize"
+    />
+    <title>Agmora - V - 3182026</title>
+    <link rel="icon" href="data:image/x-icon;base64,AAABAAEAEBAQAAEABACoBAAA">
+    
+    <!-- CRITICAL: IE11 Polyfills must load before anything else -->
+    <script>
+        // globalThis polyfill (critical for IE11)
+        if (typeof globalThis === 'undefined') {
+            var globalThisValue = typeof window !== 'undefined' ? window : 
+                                   typeof global !== 'undefined' ? global : 
+                                   typeof self !== 'undefined' ? self : this;
+            window.globalThis = globalThisValue;
+        }
+
+        // Storage shim for HTA/IE modes where localStorage/sessionStorage are missing.
+        (function () {
+            function createMemoryStorage() {
+                var store = {};
+                return {
+                    getItem: function (key) {
+                        key = String(key);
+                        return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+                    },
+                    setItem: function (key, value) {
+                        store[String(key)] = String(value);
+                    },
+                    removeItem: function (key) {
+                        delete store[String(key)];
+                    },
+                    clear: function () {
+                        store = {};
+                    },
+                    key: function (index) {
+                        var keys = [];
+                        for (var k in store) {
+                            if (Object.prototype.hasOwnProperty.call(store, k)) keys.push(k);
+                        }
+                        return keys[index] || null;
+                    }
+                };
+            }
+
+            function ensureStorage(name) {
+                var s = null;
+                try {
+                    s = window[name];
+                    if (s) {
+                        var testKey = '__agmora_storage_test__';
+                        s.setItem(testKey, '1');
+                        s.removeItem(testKey);
+                        return s;
+                    }
+                } catch (e) {}
+
+                s = createMemoryStorage();
+                try {
+                    window[name] = s;
+                } catch (e2) {}
+                return s;
+            }
+
+            // Ensure both globals exist for bare identifier usage (localStorage/sessionStorage).
+            var ls = ensureStorage('localStorage');
+            var ss = ensureStorage('sessionStorage');
+            try { localStorage = ls; } catch (e3) {}
+            try { sessionStorage = ss; } catch (e4) {}
+        })();
+        
+        // Promise.prototype.catch polyfill for IE11
+        // IE11 has Promise but .catch() may be broken or missing
+        if (typeof Promise !== 'undefined') {
+            if (!Promise.prototype.catch) {
+                Promise.prototype.catch = function(onRejected) {
+                    return this.then(undefined, onRejected);
+                };
+            }
+            
+            // Also ensure finally exists and works
+            if (!Promise.prototype.finally) {
+                Promise.prototype.finally = function(onFinally) {
+                    var self = this;
+                    return this.then(
+                        function(value) {
+                            return Promise.resolve(onFinally()).then(function() {
+                                return value;
+                            });
+                        },
+                        function(reason) {
+                            return Promise.resolve(onFinally()).then(function() {
+                                throw reason;
+                            });
+                        }
+                    );
+                };
+            }
+        }
+        
+        // Polyfill for Array.from
+        if (!Array.from) {
+            Array.from = function(arrayLike, mapFn, thisArg) {
+                var result = [];
+                var length = arrayLike.length;
+                for (var i = 0; i < length; i++) {
+                    result.push(mapFn ? mapFn.call(thisArg, arrayLike[i], i) : arrayLike[i]);
+                }
+                return result;
+            };
+        }
+        
+        // Polyfill for Object.assign
+        if (typeof Object.assign !== 'function') {
+            Object.assign = function(target) {
+                if (target === null) throw new TypeError('Cannot convert null to object');
+                var to = Object(target);
+                for (var index = 1; index < arguments.length; index++) {
+                    var nextSource = arguments[index];
+                    if (nextSource !== null && nextSource !== undefined) {
+                        for (var key in nextSource) {
+                            if (Object.prototype.hasOwnProperty.call(nextSource, key)) {
+                                to[key] = nextSource[key];
+                            }
+                        }
+                    }
+                }
+                return to;
+            };
+        }
+
+        // IE11 media play() often returns undefined; make play().catch(...) safe.
+        (function () {
+            if (!window.HTMLMediaElement || !window.HTMLMediaElement.prototype) return;
+            var proto = window.HTMLMediaElement.prototype;
+            if (typeof proto.play !== 'function' || proto.__iePlayPatched) return;
+            var originalPlay = proto.play;
+            proto.play = function () {
+                var result = originalPlay.apply(this, arguments);
+                if (result && typeof result.catch === 'function') {
+                    return result;
+                }
+                // Return a lightweight thenable for legacy browsers.
+                return {
+                    then: function () { return this; },
+                    catch: function () { return this; },
+                    finally: function () { return this; }
+                };
+            };
+            proto.__iePlayPatched = true;
+        })();
+    </script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+        }
+
+        #canvas {
+            display: block;
+            width: 100%;
+            height: 100vh;
+        }
+
+        /* Ensure the renderer container fills the viewport so the canvas is visible */
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100vh;
+            z-index: 1;
+        }
+
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: none;
+            gap: 10px;
+            z-index: 10;
+        }
+
+        .hotbar-slot {
+            width: 50px;
+            height: 50px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 2px solid #555;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .hotbar-slot:hover {
+            border-color: #aaa;
+        }
+
+        .hotbar-slot.selected {
+            border-color: #ffff00;
+            box-shadow: 0 0 10px rgba(255, 255, 0, 0.5);
+            background: rgba(0, 0, 0, 0.9);
+        }
+
+        .hotbar-slot.gear-slot {
+            border-color: #2a7ba8;
+            background: rgba(8, 24, 40, 0.82);
+            min-width: 58px;
+            font-size: 11px;
+        }
+
+        .hotbar-slot.mode-selected {
+            border-color: #7ad7ff;
+            box-shadow: 0 0 12px rgba(122, 215, 255, 0.55);
+            background: rgba(10, 40, 60, 0.95);
+        }
+
+        .block-name {
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.6;
+            font-family: monospace;
+            max-width: 300px;
+        }
+
+        #coords-hud {
+            position: absolute;
+            bottom: 70px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.65);
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 8px;
+            padding: 6px 18px;
+            font-family: monospace;
+            font-size: 14px;
+            color: #fff;
+            pointer-events: none;
+            z-index: 10;
+            display: none;
+            gap: 18px;
+            letter-spacing: 0.03em;
+        }
+        #coords-hud span { opacity: 0.7; margin-right: 3px; }
+        #coords-hud .cx { color: #ff6b6b; }
+        #coords-hud .cy { color: #6bffb8; }
+        #coords-hud .cz { color: #6bb3ff; }
+
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 5;
+        }
+
+        #controls {
+            position: absolute;
+            bottom: 100px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.8;
+        }
+
+        #server-panel {
+            position: absolute;
+            top: 150px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 15px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 100;
+            pointer-events: auto;
+            display: none; /* Hidden by default, settings are in main menu now */
+        }
+
+        #server-panel input, #server-panel button {
+            pointer-events: auto;
+            padding: 4px 8px;
+            margin: 4px 0;
+            border: 1px solid #666;
+            background: #222;
+            color: #fff;
+            border-radius: 3px;
+        }
+
+        #server-panel button {
+            cursor: pointer;
+            background: #0066cc;
+        }
+
+        #server-panel button:hover {
+            background: #0088ff;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            z-index: 100;
+        }
+
+        .loading h2 {
+            margin-bottom: 20px;
+        }
+
+        /* Gamepad inventory selection highlight */
+        .gamepad-selected {
+            border: 2px solid #ffcc00 !important;
+            box-shadow: 0 0 10px rgba(255, 204, 0, 0.6) !important;
+            background: rgba(255, 204, 0, 0.15) !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading-splash" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0, 0, 0, 0.95); color: #fff; font-family: Arial, sans-serif; font-size: 24px; padding: 40px; border: 2px solid #888; z-index: 999; text-align: center;">
+        <h2>AGMORA - LOADING</h2>
+        <p style="font-size: 14px; color: #aaa;">Initializing game engine...</p>
+    </div>
+    <div id="canvas-container"></div>
+    <div id="debug-panel" style="position: absolute; top: 10px; right: 10px; background: rgba(0, 0, 0, 0.95); color: #0f0; font-family: monospace; font-size: 12px; padding: 15px; max-height: 400px; overflow-y: auto; border: 2px solid #0f0; z-index: 1000; width: 400px; line-height: 1.4;"></div>
+    <div id="error-display" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0, 0, 0, 0.95); color: #ff6666; font-family: monospace; font-size: 14px; padding: 20px; border: 3px solid #ff6666; z-index: 999; max-width: 600px; display: none;"></div>
+    <div id="crosshair"></div>
+    
+    <div id="ui">
+        <div class="hotbar-slot selected" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+        <div class="hotbar-slot" data-block="0">
+            <div>
+                <div class="block-name"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="info">
+        <div>FPS: <span id="fps">0</span></div>
+        <div>Pos: <span id="pos">0, 0, 0</span></div>
+        <div>Chunk: <span id="chunk">0, 0</span></div>
+        <div>Blocks: <span id="blocks">0</span></div>
+    </div>
+
+    <div id="coords-hud">
+        <div><span class="cx">X</span><strong id="hud-x">0</strong></div>
+        <div><span class="cy">Y</span><strong id="hud-y">0</strong></div>
+        <div><span class="cz">Z</span><strong id="hud-z">0</strong></div>
+    </div>
+
+    <div id="controls">
+        <div><strong>Controls</strong></div>
+        <div>WASD - Move</div>
+        <div>SPACE - Jump</div>
+        <div>1-4 - Select Block</div>
+        <div>LMB - Destroy</div>
+        <div>RMB - Place</div>
+        <div>Mouse - Look</div>
+    </div>
+
+    <div id="server-panel">
+        <div style="color:#fff;margin-bottom:8px;"><strong>Online Server</strong></div>
+        <div>
+            <label for="server-host" style="color:#aaa;">Host:</label><br>
+            <input id="server-host" type="text" value="localhost" style="width:150px;">
+        </div>
+        <div>
+            <label for="server-port" style="color:#aaa;">Port:</label><br>
+            <input id="server-port" type="number" value="8080" style="width:150px;">
+        </div>
+        <div>
+            <label for="server-password" style="color:#aaa;">Password:</label><br>
+            <input id="server-password" type="text" placeholder="optional" style="width:150px;">
+        </div>
+        <button id="connect-server" style="width:100%;margin-top:8px;">Connect</button>
+    </div>
+
+    <script>
+        // Debug logging - display on HTA
+        var debugLog = [];
+        var errorMessages = [];
+        var origLog = console.log, origError = console.error, origWarn = console.warn;
+        
+        function logToDebugPanel(msg) {
+            debugLog.push(new Date().toLocaleTimeString() + ': ' + msg);
+            var panel = document.getElementById('debug-panel');
+            if (panel) {
+                panel.innerHTML = debugLog.slice(-20).join('<br>');
+                panel.scrollTop = panel.scrollHeight;
+            }
+        }
+        
+        function showError(msg) {
+            errorMessages.push(msg);
+            var display = document.getElementById('error-display');
+            if (display) {
+                display.style.display = 'block';
+                display.innerHTML = '<strong>ERROR:</strong><br>' + errorMessages.join('<br><br>');
+            }
+        }
+        
+        console.log = function() {
+            // IE11 compatible: convert arguments to array without Array.from()
+            var args = [];
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+            var msg = args.join(' ');
+            origLog.apply(console, arguments);
+            logToDebugPanel('[LOG] ' + msg);
+            // Hide loading splash when menu display changes
+            if (msg.indexOf('Menu animation started') >= 0) {
+                var splash = document.getElementById('loading-splash');
+                if (splash) splash.style.display = 'none';
+            }
+        };
+        
+        console.error = function() {
+            // IE11 compatible: convert arguments to array without Array.from()
+            var args = [];
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+            var msg = args.join(' ');
+            origError.apply(console, arguments);
+            logToDebugPanel('[ERROR] ' + msg);
+            showError(msg);
+        };
+        
+        console.warn = function() {
+            // IE11 compatible: convert arguments to array without Array.from()
+            var args = [];
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+            var msg = args.join(' ');
+            origWarn.apply(console, arguments);
+            logToDebugPanel('[WARN] ' + msg);
+        };
+        
+        // Global error handler
+        window.onerror = function(msg, url, lineNo, colNo, error) {
+            logToDebugPanel('[UNCAUGHT ERROR] ' + msg);
+            showError('Uncaught: ' + msg + ' at line ' + lineNo);
+            return true;
+        };
+        
+        // Also hook unhandledrejection for Promise errors
+        window.addEventListener('unhandledrejection', function(event) {
+            logToDebugPanel('[PROMISE REJECTION] ' + event.reason);
+            showError('Promise rejection: ' + event.reason);
+        });
+        
+        logToDebugPanel('HTA Loading... Waiting for THREE.js');
+        logToDebugPanel('Canvas container ID found: ' + (document.getElementById('canvas-container') ? 'YES' : 'NO'));
+    </script>
+    
+    <script>
+        // Write startup message to body to ensure it's visible
+        window.addEventListener('readystatechange', function() {
+            console.log('Document ready state changed to: ' + document.readyState);
+        });
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOMContentLoaded event fired');
+        });
+    </script>
+    
+    <script src="node_modules/three/build/three.min.js"></script>
+    <script>
+        if (typeof THREE === 'undefined') {
+            console.error('THREE.js failed to load!');
+        } else {
+            console.log('THREE.js loaded successfully. Version:', THREE.REVISION);
+        }
+    </script>
+    <script src="node_modules/three/examples/js/loaders/GLTFLoader.js"></script>
+    <!-- Socket.IO client (served by the Node server when available) -->
+    <script>
+        console.log('All scripts loaded. Ready for game initialization.');
+        window.addEventListener('load', function() {
+            console.log('Window load event fired');
+        });
+        setTimeout(function() {
+            console.log('Page fully loaded - Setup should have initialized');
+            console.log('Game object available:', typeof window._game);
+            console.log('Canvas container:', document.getElementById('canvas-container') ? 'Found' : 'NOT FOUND');
+            console.log('Document ready state:', document.readyState);
+        }, 1000);
+    </script>
+    <script src="/socket.io/socket.io.js" onerror="console.warn('Socket.IO not available');"></script>
+    <!-- Structure definitions – edit structures.js to change buildings/dungeons/etc. -->
+    <script src="structures.js"></script>
+    <script src="structures/cathedral_2.js"></script>
+    <script src="structures/Castle.js"></script>
+    <script src="structures/dungeon.js"></script>
+    <script src="structures/pyramid.js"></script>
+    <script src="game.legacy.js"></script>
+    <script>
+        console.log('game.legacy.js script tag processed');
+    </script>
+    <script>
+    // Hook up connect button to call into game for WebSocket
+    window.addEventListener('load', function () {
+        console.log('Window LOAD event fired - DOM is ready');
+        var btn = document.getElementById('connect-server');
+        var hostInput = document.getElementById('server-host');
+        var portInput = document.getElementById('server-port');
+        var passwordInput = document.getElementById('server-password');
+        
+        if (!btn) return;
+        
+        // Release pointer lock when clicking on input fields so user can type
+        [hostInput, portInput, passwordInput].forEach(function (input) {
+            if (!input) return;
+            input.addEventListener('mousedown', function () {
+                if (document.pointerLockElement) {
+                    document.exitPointerLock();
+                }
+            });
+            input.addEventListener('focus', function () {
+                if (document.pointerLockElement) {
+                    document.exitPointerLock();
+                }
+            });
+        });
+        
+        btn.addEventListener('click', function () {
+            var host = hostInput.value || 'localhost';
+            var port = parseInt(portInput.value, 10) || 8080;
+            var pw = passwordInput ? passwordInput.value || '' : '';
+            if (window._game && typeof window._game.connectServer === 'function') {
+                window._game.connectServer(host, port, pw);
+            } else {
+                console.warn('Game object not ready');
+            }
+        });
+    });
+    </script>
+</body>
+</html>

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agmora - V - 3182026</title>
+    <title>Agmora - alpha</title>
     <link rel="icon" href="data:image/x-icon;base64,AAABAAEAEBAQAAEABACoBAAA"> 
     <style>
         * {
@@ -67,13 +67,6 @@
             border-color: #ffff00;
             box-shadow: 0 0 10px rgba(255, 255, 0, 0.5);
             background: rgba(0, 0, 0, 0.9);
-        }
-
-        .hotbar-slot.hand-slot {
-            border-color: #a8772a;
-            background: rgba(45, 28, 6, 0.82);
-            min-width: 58px;
-            font-size: 11px;
         }
 
         .hotbar-slot.gear-slot {
@@ -212,7 +205,6 @@
     <div id="crosshair"></div>
     
     <div id="ui">
-        <div class="hotbar-slot hand-slot" data-block="0" data-equip-slot="offHand">L</div>
         <div class="hotbar-slot selected" data-block="0">
             <div>
                 <div class="block-name"></div>
@@ -258,10 +250,6 @@
                 <div class="block-name"></div>
             </div>
         </div>
-        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="0">M1</div>
-        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="1">M2</div>
-        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="2">M3</div>
-        <div class="hotbar-slot gear-slot" data-block="0" data-gear-slot="3">M4</div>
     </div>
 
     <div id="info">
@@ -354,36 +342,3 @@
     </script>
 </body>
 </html>
-        players[player.id] = player;
-        renderPlayers();
-    }
-});
-
-// Player disconnected
-socket.on('playerDisconnected', (id) => {
-    delete players[id];
-    renderPlayers();
-});
-
-// Send movement to server
-function sendMovement(x, y) {
-    socket.emit('move', { x, y });
-}
-
-// Example: move player with arrow keys
-document.addEventListener('keydown', (e) => {
-    let me = players[socket.id];
-    if (!me) return;
-    if (e.key === 'ArrowUp') me.y -= 5;
-    if (e.key === 'ArrowDown') me.y += 5;
-    if (e.key === 'ArrowLeft') me.x -= 5;
-    if (e.key === 'ArrowRight') me.x += 5;
-    sendMovement(me.x, me.y);
-    renderPlayers();
-});
-
-function renderPlayers() {
-    // Your game rendering logic here
-    console.log(players);
-}
-</script>

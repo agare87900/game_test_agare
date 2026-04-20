@@ -6,6 +6,9 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const dgram = require('dgram');
 const WebSocket = require('ws');
 
 const PORT = parseInt(process.argv[2], 10) || process.env.PORT || 3000;
@@ -13,13 +16,33 @@ const PORT = parseInt(process.argv[2], 10) || process.env.PORT || 3000;
 const HOST = process.argv[3] || process.env.HOST || '0.0.0.0';
 // optional server password (empty = no password)
 const PASSWORD = process.argv[4] || process.env.PASSWORD || '';
+const DISCOVERY_PORT = parseInt(process.env.DISCOVERY_PORT, 10) || 41234;
 
 const app = express();
 // serve everything in the workspace root (static files, images, etc.)
 app.use(express.static(path.join(__dirname)));
 
+// Root should serve the browser entry so http://localhost:3000 launches in normal browsers.
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// LAN discovery HTTP endpoint — clients probe this to detect a running server
+app.get('/api/lan-info', (_req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.json({
+    type: 'agmora_server',
+    name: `${os.hostname()} LAN`,
+    port: PORT,
+    playerCount: clients.size,
+    requiresPassword: !!PASSWORD,
+    addresses: getLanAddresses()
+  });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+const discoverySocket = dgram.createSocket('udp4');
 
 // simple state for connected clients
 const clients = new Map(); // ws -> {id,name,team,x,y,z,yaw}
@@ -32,6 +55,31 @@ function broadcast(payload, exceptWs) {
       ws.send(msg);
     }
   }
+}
+
+function getLanAddresses() {
+  const found = [];
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const details of interfaces[name] || []) {
+      if (!details || details.family !== 'IPv4' || details.internal) continue;
+      found.push(details.address);
+    }
+  }
+  return found;
+}
+
+function getDiscoveryPayload() {
+  return {
+    type: 'agmora_server',
+    name: `${os.hostname()} LAN`,
+    host: os.hostname(),
+    port: PORT,
+    playerCount: clients.size,
+    requiresPassword: !!PASSWORD,
+    addresses: getLanAddresses(),
+    timestamp: Date.now()
+  };
 }
 
 wss.on('connection', (ws) => {
@@ -108,6 +156,42 @@ wss.on('connection', (ws) => {
   });
 });
 
+discoverySocket.on('error', (err) => {
+  console.error('LAN discovery socket error:', err);
+});
+
+discoverySocket.on('message', (msg, rinfo) => {
+  try {
+    const text = String(msg || '').trim();
+    if (!text) return;
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+
+    const isDiscoveryRequest =
+      text === 'AGMORA_DISCOVER' ||
+      (parsed && (parsed.type === 'agmora_discover' || parsed.type === 'discover'));
+
+    if (!isDiscoveryRequest) return;
+
+    const payload = Buffer.from(JSON.stringify(getDiscoveryPayload()));
+    discoverySocket.send(payload, 0, payload.length, rinfo.port, rinfo.address);
+  } catch (e) {
+    console.error('Failed handling LAN discovery message:', e);
+  }
+});
+
 server.listen(PORT, HOST, () => {
   console.log(`Server listening on ${HOST}:${PORT}`);
+});
+
+discoverySocket.bind(DISCOVERY_PORT, () => {
+  try {
+    discoverySocket.setBroadcast(true);
+  } catch {}
+  console.log(`LAN discovery listening on udp://0.0.0.0:${DISCOVERY_PORT}`);
 });
